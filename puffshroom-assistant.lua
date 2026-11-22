@@ -81,6 +81,16 @@ local defaultCfg = {
 		hideHoney = false,
 		hideSoftWax = false,
 		hideBitterberry = false,
+		hideTreat = false,
+		hideRoyalJelly = false,
+	},
+	highlights = {
+		turpentine = true,
+		causticWax = true,
+		swirledWax = true,
+		beam = true,
+		label = true,
+		notify = true,
 	},
 	puffshrooms = {
 		transparencyEnabled = true,
@@ -394,7 +404,7 @@ function walkSpeedController:SetEnabled(enabled)
 	end)
 end
 
--- Token Hider (Honey Tokens, Soft Waxes, Bitterberries)
+-- Token IDs (Hide Tokens & 3D Rare Highlights)
 local tokenIds = {
 	honey = {
 		["1472135114"] = true, -- Honey Token
@@ -406,6 +416,21 @@ local tokenIds = {
 	bitterberry = {
 		["4483236276"] = true, -- Bitterberry
 		["6087985073"] = true, -- Bitterberry alt
+	},
+	treat = {
+		["2028574353"] = true, -- Treat
+	},
+	royalJelly = {
+		["1471882621"] = true, -- Royal Jelly
+	},
+	swirledWax = {
+		["8277783113"] = true, -- Swirled Wax
+	},
+	causticWax = {
+		["8277781666"] = true, -- Caustic Wax
+	},
+	turpentine = {
+		["8310376128"] = true, -- Turpentine
 	},
 }
 
@@ -440,11 +465,23 @@ do
 					addIconFromInfo(tokenIds.bitterberry, info)
 				elseif normKey == "honey" or disp == "honey" then
 					addIconFromInfo(tokenIds.honey, info)
+				elseif normKey == "treat" or disp == "treat" then
+					addIconFromInfo(tokenIds.treat, info)
+				elseif normKey == "royaljelly" or disp == "royal jelly" then
+					addIconFromInfo(tokenIds.royalJelly, info)
+				elseif normKey == "swirledwax" or disp == "swirled wax" then
+					addIconFromInfo(tokenIds.swirledWax, info)
+				elseif normKey == "causticwax" or disp == "caustic wax" then
+					addIconFromInfo(tokenIds.causticWax, info)
+				elseif normKey == "turpentine" or disp == "turpentine" then
+					addIconFromInfo(tokenIds.turpentine, info)
 				end
 			end
 		end
 	end
 end
+
+local tokenHighlighter
 
 local tokenHider = {
 	ids = tokenIds,
@@ -493,6 +530,12 @@ function tokenHider:ShouldHide(token)
 		return true
 	end
 	if cfg.tokens.hideBitterberry and self.ids.bitterberry[iconId] then
+		return true
+	end
+	if cfg.tokens.hideTreat and self.ids.treat[iconId] then
+		return true
+	end
+	if cfg.tokens.hideRoyalJelly and self.ids.royalJelly[iconId] then
 		return true
 	end
 	return false
@@ -595,6 +638,9 @@ function tokenHider:Watch(token)
 		if (obj:IsA("Decal") or obj:IsA("Texture")) and obj.GetPropertyChangedSignal then
 			table.insert(conns, obj:GetPropertyChangedSignal("Texture"):Connect(function()
 				self:Evaluate(token)
+				if tokenHighlighter then
+					tokenHighlighter:Evaluate(token)
+				end
 			end))
 		end
 	end
@@ -606,8 +652,9 @@ function tokenHider:Watch(token)
 	if token.DescendantAdded then
 		table.insert(conns, token.DescendantAdded:Connect(function(desc)
 			bindDecal(desc)
-			if self:ShouldHide(token) then
-				self:Hide(token)
+			self:Evaluate(token)
+			if tokenHighlighter then
+				tokenHighlighter:Evaluate(token)
 			end
 		end))
 	end
@@ -666,6 +713,405 @@ function tokenHider:RestoreAll()
 	end
 	for token in pairs(self.watchers) do
 		self:Unwatch(token)
+	end
+end
+
+-- 3D Token Highlighter (Swirled Wax Yellow, Caustic Wax Green, Turpentine Red)
+local HIGHLIGHT_FOLDER_NAME = "PuffAssistantTokenHighlights"
+local HIGHLIGHT_STYLES = {
+	turpentine = {
+		key = "turpentine",
+		label = "TURPENTINE",
+		notifyTitle = "Turpentine Token!",
+		color = Color3.fromRGB(255, 45, 55),
+		outline = Color3.fromRGB(255, 205, 205),
+		beamHeight = 28,
+		beamWidth = 0.6,
+	},
+	causticWax = {
+		key = "causticWax",
+		label = "CAUSTIC WAX",
+		notifyTitle = "Caustic Wax Token!",
+		color = Color3.fromRGB(45, 240, 85),
+		outline = Color3.fromRGB(205, 255, 215),
+		beamHeight = 22,
+		beamWidth = 0.48,
+	},
+	swirledWax = {
+		key = "swirledWax",
+		label = "SWIRLED WAX",
+		notifyTitle = "Swirled Wax Token!",
+		color = Color3.fromRGB(255, 225, 40),
+		outline = Color3.fromRGB(255, 252, 195),
+		beamHeight = 22,
+		beamWidth = 0.48,
+	},
+}
+
+tokenHighlighter = {
+	ids = tokenIds,
+	active = {},
+	notified = {},
+	rootFolder = nil,
+	notifyFn = nil,
+}
+
+local function getTokenPosition(token)
+	if not token then
+		return nil
+	end
+	local okPos, pos = pcall(function()
+		return token.Position
+	end)
+	if okPos and typeof(pos) == "Vector3" then
+		return pos
+	end
+	if token:IsA("Model") then
+		local okPivot, pivot = pcall(function()
+			return token:GetPivot()
+		end)
+		if okPivot and pivot then
+			return pivot.Position
+		end
+	end
+	return nil
+end
+
+function tokenHighlighter:GetRootFolder()
+	if self.rootFolder and self.rootFolder.Parent then
+		return self.rootFolder
+	end
+	local old = workspace:FindFirstChild(HIGHLIGHT_FOLDER_NAME)
+	if old then
+		pcall(function()
+			old:Destroy()
+		end)
+	end
+	local folder = Instance.new("Folder")
+	folder.Name = HIGHLIGHT_FOLDER_NAME
+	folder.Parent = workspace
+	self.rootFolder = folder
+	return folder
+end
+
+function tokenHighlighter:GetHighlightStyle(token)
+	local iconId = extractTokenIconId(token)
+	if not iconId then
+		return nil
+	end
+	if cfg.highlights.turpentine and self.ids.turpentine[iconId] then
+		return HIGHLIGHT_STYLES.turpentine
+	end
+	if cfg.highlights.causticWax and self.ids.causticWax[iconId] then
+		return HIGHLIGHT_STYLES.causticWax
+	end
+	if cfg.highlights.swirledWax and self.ids.swirledWax[iconId] then
+		return HIGHLIGHT_STYLES.swirledWax
+	end
+	return nil
+end
+
+function tokenHighlighter:SyncFollowConnection()
+	if next(self.active) ~= nil then
+		if not connections:Get("highlightFollow") then
+			local sig = RunService.RenderStepped or RunService.Heartbeat
+			if sig then
+				connections:Add("highlightFollow", sig:Connect(function()
+					self:UpdateBeacons()
+				end))
+			end
+		end
+	else
+		connections:Cancel("highlightFollow")
+	end
+end
+
+function tokenHighlighter:UpdateBeacons()
+	local stale
+	for token, entry in pairs(self.active) do
+		if not token or not token.Parent then
+			stale = stale or {}
+			table.insert(stale, token)
+		elseif entry.beaconPart then
+			local pos = getTokenPosition(token)
+			if pos then
+				pcall(function()
+					entry.beaconPart.CFrame = CFrame.new(pos.X, pos.Y + entry.beamHeight * 0.5, pos.Z)
+				end)
+			end
+		end
+	end
+	if stale then
+		for _, token in ipairs(stale) do
+			self:Remove(token)
+		end
+	end
+end
+
+function tokenHighlighter:UpdateEntryVisuals(entry)
+	if not entry then
+		return
+	end
+	if entry.beaconPart then
+		pcall(function()
+			entry.beaconPart.Transparency = cfg.highlights.beam and 0.45 or 1
+		end)
+	end
+	if entry.beaconAdornment then
+		pcall(function()
+			entry.beaconAdornment.Visible = cfg.highlights.beam
+		end)
+	end
+	if entry.billboard then
+		pcall(function()
+			entry.billboard.Enabled = cfg.highlights.label
+		end)
+	end
+end
+
+function tokenHighlighter:Apply(token, style)
+	if not token or not token.Parent or not style then
+		return
+	end
+	local existing = self.active[token]
+	if existing then
+		if existing.kind == style.key then
+			self:UpdateEntryVisuals(existing)
+			return
+		end
+		self:Remove(token)
+	end
+
+	local root = self:GetRootFolder()
+	local entryFolder = Instance.new("Folder")
+	entryFolder.Name = style.key
+	entryFolder.Parent = root
+
+	local pos = getTokenPosition(token)
+
+	pcall(function()
+		local hl = Instance.new("Highlight")
+		hl.Name = "TokenHighlight"
+		hl.Adornee = token
+		hl.FillColor = style.color
+		hl.FillTransparency = 0.25
+		hl.OutlineColor = style.outline
+		hl.OutlineTransparency = 0
+		hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+		hl.Parent = entryFolder
+	end)
+
+	pcall(function()
+		local box = Instance.new("SelectionBox")
+		box.Name = "TokenBox"
+		box.Adornee = token
+		box.Color3 = style.color
+		box.SurfaceColor3 = style.color
+		box.SurfaceTransparency = 0.65
+		box.LineThickness = 0.08
+		box.Parent = entryFolder
+	end)
+
+	local beaconPart, beaconAdornment
+	local okBeacon, createdPart, createdAdorn = pcall(function()
+		local part = Instance.new("Part")
+		part.Name = "TokenBeacon"
+		part.Anchored = true
+		part.CanCollide = false
+		part.CanTouch = false
+		part.CanQuery = false
+		part.CastShadow = false
+		part.Material = Enum.Material.Neon
+		part.Color = style.color
+		part.Size = Vector3.new(style.beamWidth, style.beamHeight, style.beamWidth)
+		part.Transparency = cfg.highlights.beam and 0.45 or 1
+		if pos then
+			part.CFrame = CFrame.new(pos.X, pos.Y + style.beamHeight * 0.5, pos.Z)
+		end
+		part.Parent = entryFolder
+
+		local boxAdorn = Instance.new("BoxHandleAdornment")
+		boxAdorn.Name = "TokenBeaconXRay"
+		boxAdorn.Adornee = part
+		boxAdorn.AlwaysOnTop = true
+		boxAdorn.ZIndex = 5
+		boxAdorn.Color3 = style.color
+		boxAdorn.Size = part.Size
+		boxAdorn.Transparency = 0.65
+		boxAdorn.Visible = cfg.highlights.beam
+		boxAdorn.Parent = part
+
+		return part, boxAdorn
+	end)
+	if okBeacon then
+		beaconPart = createdPart
+		beaconAdornment = createdAdorn
+	end
+
+	local billboard
+	local okGui, createdGui = pcall(function()
+		local gui = Instance.new("BillboardGui")
+		gui.Name = "TokenLabel"
+		gui.Adornee = token
+		gui.AlwaysOnTop = true
+		gui.Size = UDim2.new(0, 126, 0, 24)
+		gui.StudsOffsetWorldSpace = Vector3.new(0, 3.2, 0)
+		gui.Enabled = cfg.highlights.label
+		gui.Parent = entryFolder
+
+		local frame = Instance.new("Frame")
+		frame.Name = "TagFrame"
+		frame.BackgroundColor3 = Color3.fromRGB(16, 17, 20)
+		frame.BackgroundTransparency = 0.15
+		frame.BorderSizePixel = 0
+		frame.Size = UDim2.new(1, 0, 1, 0)
+		frame.Parent = gui
+
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(0, 5)
+		corner.Parent = frame
+
+		local stroke = Instance.new("UIStroke")
+		stroke.Thickness = 1.8
+		stroke.Color = style.color
+		stroke.Parent = frame
+
+		local lbl = Instance.new("TextLabel")
+		lbl.Name = "Label"
+		lbl.BackgroundTransparency = 1
+		lbl.Font = Enum.Font.GothamBold
+		lbl.Size = UDim2.new(1, -8, 1, 0)
+		lbl.Position = UDim2.new(0, 4, 0, 0)
+		lbl.Text = style.label
+		lbl.TextColor3 = style.color
+		lbl.TextSize = 12
+		lbl.Parent = frame
+
+		return gui
+	end)
+	if okGui then
+		billboard = createdGui
+	end
+
+	self.active[token] = {
+		kind = style.key,
+		beamHeight = style.beamHeight,
+		folder = entryFolder,
+		beaconPart = beaconPart,
+		beaconAdornment = beaconAdornment,
+		billboard = billboard,
+	}
+
+	if cfg.highlights.notify and not self.notified[token] and self.notifyFn then
+		self.notified[token] = true
+		local field = pos and getFieldAt(pos) or nil
+		local fieldName = field and field.Name or "Unknown Field"
+		self.notifyFn(style.notifyTitle, fieldName)
+	end
+
+	self:SyncFollowConnection()
+end
+
+function tokenHighlighter:Remove(token)
+	if not token then
+		return
+	end
+	local entry = self.active[token]
+	if not entry then
+		return
+	end
+	self.active[token] = nil
+	if entry.folder then
+		pcall(function()
+			entry.folder:Destroy()
+		end)
+	end
+	self:SyncFollowConnection()
+end
+
+function tokenHighlighter:Evaluate(token)
+	if not token or not token.Parent then
+		self:Remove(token)
+		return
+	end
+	local style = self:GetHighlightStyle(token)
+	if style then
+		self:Apply(token, style)
+	else
+		self:Remove(token)
+	end
+end
+
+function tokenHighlighter:RefreshAll()
+	local folder = workspace:FindFirstChild("Collectibles")
+	if not folder then
+		local existing = {}
+		for token in pairs(self.active) do
+			table.insert(existing, token)
+		end
+		for _, token in ipairs(existing) do
+			self:Remove(token)
+		end
+		return
+	end
+	local toRemove = {}
+	for token in pairs(self.active) do
+		if token.Parent ~= folder then
+			table.insert(toRemove, token)
+		end
+	end
+	for _, token in ipairs(toRemove) do
+		self:Remove(token)
+	end
+	for _, token in ipairs(folder:GetChildren()) do
+		self:Evaluate(token)
+	end
+end
+
+function tokenHighlighter:Maintain()
+	local existing = {}
+	for token, entry in pairs(self.active) do
+		table.insert(existing, { token = token, entry = entry })
+	end
+	for _, item in ipairs(existing) do
+		local token = item.token
+		local entry = item.entry
+		if not token or not token.Parent then
+			self:Remove(token)
+		else
+			local style = self:GetHighlightStyle(token)
+			if not style then
+				self:Remove(token)
+			elseif style.key ~= entry.kind then
+				self:Apply(token, style)
+			else
+				self:UpdateEntryVisuals(entry)
+			end
+		end
+	end
+end
+
+function tokenHighlighter:ClearAll()
+	connections:Cancel("highlightFollow")
+	local existing = {}
+	for token in pairs(self.active) do
+		table.insert(existing, token)
+	end
+	for _, token in ipairs(existing) do
+		self:Remove(token)
+	end
+	table.clear(self.notified)
+	if self.rootFolder then
+		pcall(function()
+			self.rootFolder:Destroy()
+		end)
+		self.rootFolder = nil
+	end
+	local stray = workspace:FindFirstChild(HIGHLIGHT_FOLDER_NAME)
+	if stray then
+		pcall(function()
+			stray:Destroy()
+		end)
 	end
 end
 
@@ -1503,6 +1949,8 @@ ui.Notify = function(title, description)
 	end)
 end
 
+tokenHighlighter.notifyFn = ui.Notify
+
 ui.AddTab = function(tabName, image, twoColumn, startActive)
 	local tabBtn = uiParts.tabbutton:Clone()
 	tabBtn.Name = "TabButton_" .. tabName
@@ -1981,6 +2429,21 @@ end
 
 movementFolder.Toggle(true, true)
 
+local highlightFolder = assistantTab.AddFolder("Highlight Tokens (3D)")
+
+local function onHighlightToggleChanged()
+	tokenHighlighter:RefreshAll()
+end
+
+controls.highlightTurpentine = highlightFolder.AddSwitch("Highlight Turpentine (Red)", onHighlightToggleChanged, "highlights", "turpentine")
+controls.highlightCausticWax = highlightFolder.AddSwitch("Highlight Caustic Wax (Green)", onHighlightToggleChanged, "highlights", "causticWax")
+controls.highlightSwirledWax = highlightFolder.AddSwitch("Highlight Swirled Wax (Yellow)", onHighlightToggleChanged, "highlights", "swirledWax")
+controls.highlightBeam = highlightFolder.AddSwitch("3D Beacon Beam", onHighlightToggleChanged, "highlights", "beam")
+controls.highlightLabel = highlightFolder.AddSwitch("Floating Token Label", onHighlightToggleChanged, "highlights", "label")
+controls.highlightNotify = highlightFolder.AddSwitch("Notify On Rare Token", nil, "highlights", "notify")
+
+highlightFolder.Toggle(true, true)
+
 -- Right Column: Hide Tokens + Puffshroom Transparency
 local tokensFolder = assistantTab.AddFolder("Hide Tokens", true)
 
@@ -1991,6 +2454,8 @@ end
 controls.hideHoney = tokensFolder.AddSwitch("Hide Honey Tokens", onTokenToggleChanged, "tokens", "hideHoney")
 controls.hideSoftWax = tokensFolder.AddSwitch("Hide Soft Waxes", onTokenToggleChanged, "tokens", "hideSoftWax")
 controls.hideBitterberry = tokensFolder.AddSwitch("Hide Bitterberries", onTokenToggleChanged, "tokens", "hideBitterberry")
+controls.hideTreat = tokensFolder.AddSwitch("Hide Treats", onTokenToggleChanged, "tokens", "hideTreat")
+controls.hideRoyalJelly = tokensFolder.AddSwitch("Hide Royal Jellies", onTokenToggleChanged, "tokens", "hideRoyalJelly")
 
 tokensFolder.Toggle(true, true)
 
@@ -2031,9 +2496,17 @@ settingsFolder.AddButton("Reset All Settings", function()
 	controls.walkdynamic.Set(cfg.movement.walkdynamic)
 	controls.walkspeed.Set(cfg.movement.walkspeed)
 	controls.walkspeed2.Set(cfg.movement.walkspeed2)
+	controls.highlightTurpentine.Set(cfg.highlights.turpentine)
+	controls.highlightCausticWax.Set(cfg.highlights.causticWax)
+	controls.highlightSwirledWax.Set(cfg.highlights.swirledWax)
+	controls.highlightBeam.Set(cfg.highlights.beam)
+	controls.highlightLabel.Set(cfg.highlights.label)
+	controls.highlightNotify.Set(cfg.highlights.notify)
 	controls.hideHoney.Set(cfg.tokens.hideHoney)
 	controls.hideSoftWax.Set(cfg.tokens.hideSoftWax)
 	controls.hideBitterberry.Set(cfg.tokens.hideBitterberry)
+	controls.hideTreat.Set(cfg.tokens.hideTreat)
+	controls.hideRoyalJelly.Set(cfg.tokens.hideRoyalJelly)
 	controls.transparencyEnabled.Set(cfg.puffshrooms.transparencyEnabled)
 	controls.commonTransparency.Set(cfg.puffshrooms.commonTransparency)
 	controls.rareTransparency.Set(cfg.puffshrooms.rareTransparency)
@@ -2061,13 +2534,17 @@ local function bindCollectiblesFolder(folder)
 	connections:Add("collectiblesAdded", folder.ChildAdded:Connect(function(token)
 		tokenHider:Watch(token)
 		tokenHider:Evaluate(token)
+		tokenHighlighter:Evaluate(token)
 	end))
 	connections:Add("collectiblesRemoved", folder.ChildRemoved:Connect(function(token)
 		tokenHider:Unwatch(token)
+		tokenHighlighter:Remove(token)
+		tokenHighlighter.notified[token] = nil
 	end))
 	for _, token in ipairs(folder:GetChildren()) do
 		tokenHider:Watch(token)
 		tokenHider:Evaluate(token)
+		tokenHighlighter:Evaluate(token)
 	end
 end
 
@@ -2227,6 +2704,7 @@ stepMonitor = function(skipMaintain)
 
 	if not skipMaintain then
 		tokenHider:Maintain()
+		tokenHighlighter:Maintain()
 	end
 end
 
@@ -2243,6 +2721,7 @@ cleanup = function()
 	connections:CancelAll()
 	walkSpeedController:Restore()
 	tokenHider:RestoreAll()
+	tokenHighlighter:ClearAll()
 	puffVisuals:RestoreAll()
 	if ScreenGui and ScreenGui.Parent then
 		ScreenGui:Destroy()
@@ -2265,6 +2744,7 @@ api = {
 if isTestHarness then
 	api.parsePuffshroom = parsePuffshroom
 	api.tokenHider = tokenHider
+	api.tokenHighlighter = tokenHighlighter
 	api.puffVisuals = puffVisuals
 	api.walkSpeedController = walkSpeedController
 	api.monitorState = monitorState

@@ -13,7 +13,8 @@ The loader resolves the latest `main` commit SHA from GitHub and fetches its imm
 ## Features
 
 - **Atlas+ WalkSpeed:** Fixed and dynamic walkspeed modes up to `90`
-- **Token Hider:** Independently hide Honey, Soft Wax, and Bitterberry tokens
+- **Token Hider:** Independently hide Honey, Soft Wax, Bitterberry, Treat, and Royal Jelly tokens
+- **3D Rare Token Highlights:** Highlight, selection box, beacon beam, and floating label for Swirled Wax (Yellow), Caustic Wax (Green), and Turpentine (Red)
 - **Puffshroom Transparency:** Adjust transparency for Common, Rare, and Epic puffshrooms while keeping Legendary and Mythic puffshrooms 100% visible
 - **Mythic Monitor HUD:** Top-of-screen live indicator and spawn notification whenever a Mythic puffshroom is present on the map
 

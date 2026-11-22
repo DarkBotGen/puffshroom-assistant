@@ -161,7 +161,8 @@ end
 -- Minimal mirror of Puffshroom Assistant logic under test
 local cfg = {
 	movement = { walkspeedenabled = false, walkdynamic = false, walkspeed = 90, walkspeed2 = 1.5 },
-	tokens = { hideHoney = false, hideSoftWax = false, hideBitterberry = false },
+	tokens = { hideHoney = false, hideSoftWax = false, hideBitterberry = false, hideTreat = false, hideRoyalJelly = false },
+	highlights = { turpentine = true, causticWax = true, swirledWax = true, beam = true, label = true, notify = true },
 	puffshrooms = { transparencyEnabled = true, commonTransparency = 0, rareTransparency = 0, epicTransparency = 0, fadeGui = false },
 	monitor = { enabled = true, notifyOnMythic = true },
 }
@@ -231,11 +232,16 @@ assert(humanoid.WalkSpeed == 90, "dynamic mode must cap at max walkspeed 90")
 walkSpeedController:Restore()
 assert(humanoid.WalkSpeed == 70, "restoring walkspeed should return to PlayerMovespeed")
 
--- 2. Token Hider tests (Honey 1472135114, Soft Wax 8277778300 + EggTypes, Bitterberry 4483236276/6087985073)
+-- 2. Token Hider & Highlight tests (Honey, Soft Wax, Bitterberry, Treat, Royal Jelly + Swirled/Caustic/Turpentine)
 local tokenIds = {
 	honey = { ["1472135114"] = true, ["1952683491"] = true },
 	softWax = { ["8277778300"] = true },
 	bitterberry = { ["4483236276"] = true, ["6087985073"] = true },
+	treat = { ["2028574353"] = true },
+	royalJelly = { ["1471882621"] = true },
+	swirledWax = { ["8277783113"] = true },
+	causticWax = { ["8277781666"] = true },
+	turpentine = { ["8310376128"] = true },
 }
 local tokenHider = { ids = tokenIds, saved = {}, watchers = {} }
 local function extractTokenIconId(token)
@@ -248,6 +254,8 @@ function tokenHider:ShouldHide(token)
 	return (cfg.tokens.hideHoney and self.ids.honey[id])
 		or (cfg.tokens.hideSoftWax and self.ids.softWax[id])
 		or (cfg.tokens.hideBitterberry and self.ids.bitterberry[id])
+		or (cfg.tokens.hideTreat and self.ids.treat[id])
+		or (cfg.tokens.hideRoyalJelly and self.ids.royalJelly[id])
 		or false
 end
 function tokenHider:Hide(token)
@@ -280,23 +288,67 @@ end
 local honeyTok, honeyFront = makeToken("1472135114")
 local waxTok, waxFront = makeToken("8277778300")
 local bitterTok, bitterFront = makeToken("4483236276")
+local treatTok, treatFront = makeToken("2028574353")
+local rjTok, rjFront = makeToken("1471882621")
+local starTreatTok, starTreatFront = makeToken("2028603146")
+local starJellyTok, starJellyFront = makeToken("2319943273")
 local linkTok, linkFront = makeToken("1629547638")
-honeyTok.Parent, waxTok.Parent, bitterTok.Parent, linkTok.Parent = true, true, true, true
+honeyTok.Parent, waxTok.Parent, bitterTok.Parent, treatTok.Parent, rjTok.Parent = true, true, true, true, true
+starTreatTok.Parent, starJellyTok.Parent, linkTok.Parent = true, true, true
 
 cfg.tokens.hideHoney = true
 cfg.tokens.hideSoftWax = true
 cfg.tokens.hideBitterberry = true
-for _, tok in ipairs({ honeyTok, waxTok, bitterTok, linkTok }) do
+cfg.tokens.hideTreat = true
+cfg.tokens.hideRoyalJelly = true
+for _, tok in ipairs({ honeyTok, waxTok, bitterTok, treatTok, rjTok, starTreatTok, starJellyTok, linkTok }) do
 	tokenHider:Evaluate(tok)
 end
 assert(honeyTok.LocalTransparencyModifier == 1 and honeyFront.Transparency == 1, "honey token should be hidden")
 assert(waxTok.LocalTransparencyModifier == 1 and waxFront.Transparency == 1, "soft wax token should be hidden")
 assert(bitterTok.LocalTransparencyModifier == 1 and bitterFront.Transparency == 1, "bitterberry token should be hidden")
+assert(treatTok.LocalTransparencyModifier == 1 and treatFront.Transparency == 1, "treat token should be hidden")
+assert(rjTok.LocalTransparencyModifier == 1 and rjFront.Transparency == 1, "royal jelly token should be hidden")
+assert(starTreatTok.LocalTransparencyModifier == 0 and starTreatFront.Transparency == 0, "star treat must stay visible")
+assert(starJellyTok.LocalTransparencyModifier == 0 and starJellyFront.Transparency == 0, "star jelly must stay visible")
 assert(linkTok.LocalTransparencyModifier == 0 and linkFront.Transparency == 0, "token link must stay visible")
 
 cfg.tokens.hideSoftWax = false
+cfg.tokens.hideTreat = false
+cfg.tokens.hideRoyalJelly = false
 tokenHider:Evaluate(waxTok)
+tokenHider:Evaluate(treatTok)
+tokenHider:Evaluate(rjTok)
 assert(waxTok.LocalTransparencyModifier == 0 and waxFront.Transparency == 0, "soft wax should restore when untoggled")
+assert(treatTok.LocalTransparencyModifier == 0 and treatFront.Transparency == 0, "treat should restore when untoggled")
+assert(rjTok.LocalTransparencyModifier == 0 and rjFront.Transparency == 0, "royal jelly should restore when untoggled")
+
+-- 2b. 3D Highlight matching & color presets
+local HIGHLIGHT_STYLES = {
+	swirledWax = { key = "swirledWax", label = "SWIRLED WAX", color = { 255, 225, 40 } },
+	causticWax = { key = "causticWax", label = "CAUSTIC WAX", color = { 45, 240, 85 } },
+	turpentine = { key = "turpentine", label = "TURPENTINE", color = { 255, 45, 55 } },
+}
+local function getHighlightStyle(token)
+	local id = extractTokenIconId(token)
+	if not id then return nil end
+	if cfg.highlights.turpentine and tokenIds.turpentine[id] then return HIGHLIGHT_STYLES.turpentine end
+	if cfg.highlights.causticWax and tokenIds.causticWax[id] then return HIGHLIGHT_STYLES.causticWax end
+	if cfg.highlights.swirledWax and tokenIds.swirledWax[id] then return HIGHLIGHT_STYLES.swirledWax end
+	return nil
+end
+
+local swirledTok = makeToken("8277783113")
+local causticTok = makeToken("8277781666")
+local turpTok = makeToken("8310376128")
+assert(getHighlightStyle(swirledTok).key == "swirledWax" and getHighlightStyle(swirledTok).color[1] == 255 and getHighlightStyle(swirledTok).color[2] == 225, "swirled wax should highlight yellow")
+assert(getHighlightStyle(causticTok).key == "causticWax" and getHighlightStyle(causticTok).color[2] == 240 and getHighlightStyle(causticTok).color[1] == 45, "caustic wax should highlight green")
+assert(getHighlightStyle(turpTok).key == "turpentine" and getHighlightStyle(turpTok).color[1] == 255 and getHighlightStyle(turpTok).color[2] == 45, "turpentine should highlight red")
+assert(getHighlightStyle(waxTok) == nil and getHighlightStyle(treatTok) == nil and getHighlightStyle(rjTok) == nil and getHighlightStyle(linkTok) == nil, "non-highlighted tokens must return nil")
+
+cfg.highlights.causticWax = false
+assert(getHighlightStyle(causticTok) == nil, "disabling caustic highlight should return nil")
+cfg.highlights.causticWax = true
 
 -- 3. Puffshroom Transparency & Mythic Monitor tests
 local fieldRose = makeMockInstance("Part", "Rose Field")
