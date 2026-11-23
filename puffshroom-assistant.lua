@@ -103,6 +103,18 @@ local defaultCfg = {
 		enabled = true,
 		notifyOnMythic = true,
 	},
+	decorations = {
+		hide = false,
+	},
+	flames = {
+		enabled = false,
+		shiftLockCompat = true,
+		refreshPriority = true,
+		onlyRefreshReady = false,
+		smartAutoDig = false,
+		refreshAge = 3.0,
+		maxRange = 30,
+	},
 	misc = {
 		mobiletoggle = false,
 	},
@@ -132,17 +144,18 @@ end
 local cfg = deepCopy(defaultCfg)
 
 local function loadConfig()
-	if not (isfolder and isfile and readfile) then
-		return
+	if isfolder and isfile and readfile then
+		pcall(function()
+			if isfile(CONFIG_PATH) then
+				local decoded = HttpService:JSONDecode(readfile(CONFIG_PATH))
+				mergeConfig(cfg, decoded)
+			end
+		end)
 	end
-	pcall(function()
-		if isfile(CONFIG_PATH) then
-			local decoded = HttpService:JSONDecode(readfile(CONFIG_PATH))
-			mergeConfig(cfg, decoded)
-		end
-	end)
 	cfg.movement.walkspeed = math.clamp(cfg.movement.walkspeed, 30, 90)
 	cfg.movement.walkspeed2 = math.clamp(math.round(cfg.movement.walkspeed2 * 10) / 10, 1, 2)
+	cfg.flames.refreshAge = math.clamp(math.round(cfg.flames.refreshAge * 10) / 10, 1.5, 4.5)
+	cfg.flames.maxRange = math.clamp(math.floor(cfg.flames.maxRange), 15, 45)
 	cfg.puffshrooms.commonTransparency = math.clamp(cfg.puffshrooms.commonTransparency, 0, 1)
 	cfg.puffshrooms.rareTransparency = math.clamp(cfg.puffshrooms.rareTransparency, 0, 1)
 	cfg.puffshrooms.epicTransparency = math.clamp(cfg.puffshrooms.epicTransparency, 0, 1)
@@ -274,6 +287,15 @@ do
 			gameApi.EggTypes = mod.GetTypes
 		end
 	end
+
+	local collectors = ReplicatedStorage:FindFirstChild("Collectors")
+	local localCollectMod = collectors and collectors:FindFirstChild("LocalCollect")
+	if localCollectMod then
+		local ok, mod = pcall(require, localCollectMod)
+		if ok and type(mod) == "table" and type(mod.Run) == "function" then
+			gameApi.LocalCollect = mod.Run
+		end
+	end
 end
 
 function gameApi:Cache(...)
@@ -287,10 +309,15 @@ function gameApi:Cache(...)
 	return ok and result or nil
 end
 
--- Helper to get character Humanoid safely
+-- Helper to get character Humanoid & RootPart safely
 local function getHumanoid()
 	local char = localPlayer and localPlayer.Character
 	return char and char:FindFirstChildOfClass("Humanoid") or nil
+end
+
+local function getRootPart()
+	local char = localPlayer and localPlayer.Character
+	return char and char:FindFirstChild("HumanoidRootPart") or nil
 end
 
 -- Field resolver for puffshrooms
@@ -322,6 +349,38 @@ local function getFieldAt(point)
 			if math.abs(offset.X) <= field.Size.X / 2 + 2 and math.abs(offset.Z) <= field.Size.Z / 2 + 2 then
 				return field
 			end
+		end
+	end
+	return nil
+end
+
+local function getInstancePosition(inst)
+	if not inst then
+		return nil
+	end
+	local okPos, pos = pcall(function()
+		return inst.Position
+	end)
+	if okPos and typeof(pos) == "Vector3" then
+		return pos
+	end
+	if inst:IsA("Model") then
+		local okPrim, prim = pcall(function()
+			return inst.PrimaryPart
+		end)
+		if okPrim and prim then
+			local okP, pPos = pcall(function()
+				return prim.Position
+			end)
+			if okP and typeof(pPos) == "Vector3" then
+				return pPos
+			end
+		end
+		local okPivot, pivot = pcall(function()
+			return inst:GetPivot()
+		end)
+		if okPivot and pivot then
+			return pivot.Position
 		end
 	end
 	return nil
@@ -399,6 +458,548 @@ function walkSpeedController:SetEnabled(enabled)
 	threads:Add("walkspeed", function()
 		while cfg.movement.walkspeedenabled and not threads.closed do
 			self:Step()
+			task.wait(0.1)
+		end
+	end)
+end
+
+-- Reversible Hide Decorations (exact targets from fullscript.txt)
+local WORKSPACE_DECO_NAMES = {
+	"Amulets",
+	"Shell Amulets",
+	"Stickbug Amulets",
+	"BallArrowFolder",
+	"BoostBalls",
+	"Campsite",
+	"ClassicMinigame",
+	"Cubs",
+	"Faces",
+	"FieldDecos",
+	"Frame",
+	"Frogs",
+	"Goo",
+	"Paths",
+	"Invisible Walls",
+	"Leaderboards",
+	"Territories",
+	"TheGamesEvent",
+	"TheGames_WideBanners",
+	"Bee Bear Hive",
+	"Noob Bear",
+	"OnettNPC",
+	"Pro Bear",
+	"Top Bear",
+	"BuckoAtHQ",
+	"RileyAtHQ",
+	"Honey",
+	"Lion",
+}
+
+local HIVE_DECO_NAMES = {
+	"HiveModels",
+	"StickerCanvases",
+}
+
+local DECORATION_CHILD_NAMES = {
+	"35ZoneCave",
+	"BubbleWandChimney",
+	"TreatBooth",
+	"Coconut Field",
+	"Pepper Patch",
+	"Pine Tree",
+	"SpiderCave",
+	"Petal Shop",
+	"JumpGames",
+	"PEggMaze",
+}
+
+local decorationsController = {
+	detached = {},
+	detachedSet = {},
+	savedPlatforms = {},
+	hidden = false,
+}
+
+function decorationsController:Detach(inst)
+	if not inst or self.detachedSet[inst] then
+		return
+	end
+	local okParent, origParent = pcall(function()
+		return inst.Parent
+	end)
+	if not okParent or not origParent then
+		return
+	end
+	self.detachedSet[inst] = true
+	table.insert(self.detached, { inst = inst, parent = origParent })
+	pcall(function()
+		inst.Parent = nil
+	end)
+end
+
+function decorationsController:Hide()
+	for _, name in ipairs(WORKSPACE_DECO_NAMES) do
+		self:Detach(workspace:FindFirstChild(name))
+	end
+
+	local map = workspace:FindFirstChild("Map")
+	if map then
+		self:Detach(map:FindFirstChild("Fences"))
+	end
+
+	local hiveDeco = workspace:FindFirstChild("HiveDeco")
+	if hiveDeco then
+		for _, name in ipairs(HIVE_DECO_NAMES) do
+			self:Detach(hiveDeco:FindFirstChild(name))
+		end
+	end
+
+	local hivePlatforms = workspace:FindFirstChild("HivePlatforms")
+	if hivePlatforms then
+		for _, slot in ipairs(hivePlatforms:GetChildren()) do
+			for _, item in ipairs(slot:GetChildren()) do
+				if item.Name == "Platform" then
+					if self.savedPlatforms[item] == nil then
+						local okCol, origCol = pcall(function()
+							return item.CanCollide
+						end)
+						if okCol then
+							self.savedPlatforms[item] = origCol
+						end
+					end
+					pcall(function()
+						item.CanCollide = false
+					end)
+				elseif item.Name ~= "Hive" and item.Name ~= "PlayerRef" then
+					self:Detach(item)
+				end
+			end
+		end
+	end
+
+	local decorations = workspace:FindFirstChild("Decorations")
+	if decorations then
+		local misc = decorations:FindFirstChild("Misc")
+		if misc then
+			for _, child in ipairs(misc:GetChildren()) do
+				local n = child.Name
+				if string.find(n, "Blue Flower") or n == "Bamboo" or n == "Bush" or n == "Mushroom" then
+					self:Detach(child)
+				end
+			end
+		end
+
+		for _, name in ipairs(DECORATION_CHILD_NAMES) do
+			self:Detach(decorations:FindFirstChild(name))
+		end
+
+		for _, child in ipairs(decorations:GetChildren()) do
+			local n = child.Name
+			if string.find(n, "Dandelion") or string.find(n, "Clover") or string.find(n, "Rose") or string.find(n, "Sign") or string.find(n, "Glider") or n == "ShopWord" then
+				self:Detach(child)
+			end
+		end
+	end
+
+	for _, child in ipairs(workspace:GetChildren()) do
+		local okMatch, isBarrier = pcall(function()
+			return child.ClassName == "Part" and child.CollisionGroup == "BoostBallBarrier"
+		end)
+		if okMatch and isBarrier then
+			self:Detach(child)
+		end
+	end
+
+	self.hidden = true
+end
+
+function decorationsController:Restore()
+	for i = #self.detached, 1, -1 do
+		local entry = self.detached[i]
+		if entry.inst and entry.parent then
+			pcall(function()
+				entry.inst.Parent = entry.parent
+			end)
+		end
+	end
+	table.clear(self.detached)
+	table.clear(self.detachedSet)
+
+	for plat, origCol in pairs(self.savedPlatforms) do
+		pcall(function()
+			plat.CanCollide = origCol
+		end)
+	end
+	table.clear(self.savedPlatforms)
+	self.hidden = false
+end
+
+function decorationsController:SetEnabled(enabled)
+	if enabled then
+		self:Hide()
+	else
+		self:Restore()
+	end
+end
+
+-- Standalone BodyGyro Auto-Face Flames & Refresh (Shift Lock compatible)
+local FLAME_RENDER_STEP_NAME = "PuffAssistantFlameFace"
+
+local function isShiftLockActive()
+	local ok, active = pcall(function()
+		return UserInputService.MouseBehavior == Enum.MouseBehavior.LockCenter
+	end)
+	return ok and active == true
+end
+
+local function isClimbing(hum)
+	if not hum then
+		return false
+	end
+	local ok, state = pcall(function()
+		return hum:GetState() == Enum.HumanoidStateType.Climbing
+	end)
+	return ok and state == true
+end
+
+local flameController = {
+	tracked = {},
+	gyro = nil,
+	managedHumanoid = nil,
+	savedAutoRotate = nil,
+	renderBound = false,
+	stopDig = false,
+	statusLabel = nil,
+	lastStatusText = nil,
+}
+
+function flameController:SuppressAutoRotate(hum)
+	if not hum then
+		return
+	end
+	if self.managedHumanoid and self.managedHumanoid ~= hum then
+		self:RestoreAutoRotate()
+	end
+	if self.managedHumanoid ~= hum then
+		local okRead, orig = pcall(function()
+			return hum.AutoRotate
+		end)
+		self.savedAutoRotate = (okRead and type(orig) == "boolean") and orig or true
+		self.managedHumanoid = hum
+	end
+	pcall(function()
+		hum.AutoRotate = false
+	end)
+end
+
+function flameController:RestoreAutoRotate()
+	local hum = self.managedHumanoid
+	local saved = self.savedAutoRotate
+	self.managedHumanoid = nil
+	self.savedAutoRotate = nil
+	if hum and hum.Parent and saved ~= nil then
+		pcall(function()
+			hum.AutoRotate = saved
+		end)
+	end
+end
+
+function flameController:UnbindRenderStep()
+	connections:Cancel("flameFace")
+	if self.renderBound and RunService.UnbindFromRenderStep then
+		pcall(function()
+			RunService:UnbindFromRenderStep(FLAME_RENDER_STEP_NAME)
+		end)
+		self.renderBound = false
+	end
+end
+
+local function inspectFlame(flameObj, recordedSpawnTime, now)
+	if not flameObj or not flameObj.Parent then
+		return nil
+	end
+	local pos = getInstancePosition(flameObj)
+	if not pos then
+		return nil
+	end
+	local okValid, sizeVal = pcall(function()
+		local pf = flameObj:FindFirstChild("PF")
+		if not pf then
+			return nil
+		end
+		local s = pf.Size.Keypoints[1].Value
+		local g = pf.Color.Keypoints[1].Value.G
+		if s <= 1.4 or g <= 0.2 then
+			return nil
+		end
+		return s
+	end)
+	if not okValid or not sizeVal then
+		return nil
+	end
+
+	local age
+	if type(recordedSpawnTime) == "number" then
+		age = math.max(0, now - recordedSpawnTime)
+	else
+		local estRem = 1 + math.clamp((sizeVal - 1.4) / 0.35, 0, 1) * 5
+		age = math.max(0, 6 - estRem)
+	end
+	return pos, age
+end
+
+function flameController:SetStatusText(text)
+	if self.lastStatusText == text then
+		return
+	end
+	self.lastStatusText = text
+	if self.statusLabel then
+		self.statusLabel.Text = text
+	end
+end
+
+function flameController:EnsureGyro(rootPart)
+	if self.gyro and self.gyro.Parent ~= rootPart then
+		pcall(function()
+			self.gyro:Destroy()
+		end)
+		self.gyro = nil
+	end
+	if not self.gyro and rootPart then
+		local okGyro, created = pcall(function()
+			local g = Instance.new("BodyGyro")
+			g.Name = "PuffFlameGyro"
+			g.P = 20000
+			g.D = 400
+			g.MaxTorque = Vector3.new(0, 0, 0)
+			g.Parent = rootPart
+			return g
+		end)
+		if okGyro then
+			self.gyro = created
+		end
+	end
+	return self.gyro
+end
+
+function flameController:ReleaseGyro()
+	self:RestoreAutoRotate()
+	if self.gyro then
+		pcall(function()
+			self.gyro.MaxTorque = Vector3.new(0, 0, 0)
+			self.gyro:Destroy()
+		end)
+		self.gyro = nil
+	end
+end
+
+function flameController:ZeroTorque()
+	self:RestoreAutoRotate()
+	if self.gyro then
+		pcall(function()
+			self.gyro.MaxTorque = Vector3.new(0, 0, 0)
+		end)
+	end
+end
+
+function flameController:BindFolder(folder)
+	connections:Cancel("flamesAdded")
+	connections:Cancel("flamesRemoved")
+	if not folder then
+		table.clear(self.tracked)
+		return
+	end
+	connections:Add("flamesAdded", folder.ChildAdded:Connect(function(child)
+		self.tracked[child] = os.clock()
+	end))
+	connections:Add("flamesRemoved", folder.ChildRemoved:Connect(function(child)
+		self.tracked[child] = nil
+	end))
+	for _, child in ipairs(folder:GetChildren()) do
+		if self.tracked[child] == nil then
+			self.tracked[child] = false
+		end
+	end
+end
+
+function flameController:SelectTarget(rootPos, field, now)
+	if not rootPos or not field then
+		return nil, false, "idle"
+	end
+	local maxRange = math.clamp(tonumber(cfg.flames.maxRange) or 30, 15, 45)
+	local refreshAge = math.clamp(tonumber(cfg.flames.refreshAge) or 3.0, 1.5, 4.5)
+	local hasFreshInRange = false
+	local bestReady = nil
+	local bestFallback = nil
+	local stale = nil
+
+	for flameObj, recordedTime in pairs(self.tracked) do
+		if not flameObj or not flameObj.Parent then
+			stale = stale or {}
+			table.insert(stale, flameObj)
+		else
+			local pos, age = inspectFlame(flameObj, recordedTime, now)
+			if pos then
+				local dx = pos.X - rootPos.X
+				local dz = pos.Z - rootPos.Z
+				local dist = math.sqrt(dx * dx + dz * dz)
+				if dist < maxRange and getFieldAt(pos) == field then
+					if age < refreshAge then
+						hasFreshInRange = true
+					end
+					if dist > 4 then
+						if age >= refreshAge then
+							if not bestReady or age > bestReady.age + 0.15 or (math.abs(age - bestReady.age) <= 0.15 and dist < bestReady.dist) then
+								bestReady = { obj = flameObj, pos = pos, age = age, dist = dist }
+							end
+						end
+						if not bestFallback or dist < bestFallback.dist then
+							bestFallback = { obj = flameObj, pos = pos, age = age, dist = dist }
+						end
+					end
+				end
+			end
+		end
+	end
+
+	if stale then
+		for _, obj in ipairs(stale) do
+			self.tracked[obj] = nil
+		end
+	end
+
+	if cfg.flames.refreshPriority then
+		if bestReady then
+			return bestReady, false, "refresh"
+		elseif cfg.flames.onlyRefreshReady then
+			return nil, hasFreshInRange, "waiting"
+		else
+			return bestFallback, hasFreshInRange, bestFallback and "face" or "idle"
+		end
+	end
+	return bestFallback, false, bestFallback and "face" or "idle"
+end
+
+function flameController:Step(now)
+	if not cfg.flames.enabled then
+		self:ReleaseGyro()
+		self.stopDig = false
+		self:SetStatusText("Target: Disabled")
+		return
+	end
+
+	local rootPart = getRootPart()
+	local hum = getHumanoid()
+	if not rootPart or not hum or not hum.Parent or hum.Health <= 0 then
+		self:ZeroTorque()
+		self.stopDig = false
+		self:SetStatusText("Target: Waiting for character")
+		return
+	end
+
+	local rootPos = getInstancePosition(rootPart)
+	local field = rootPos and getFieldAt(rootPos) or nil
+	if not field then
+		self:ZeroTorque()
+		self.stopDig = false
+		self:SetStatusText("Target: Not in a field")
+		return
+	end
+
+	local currentClock = now or os.clock()
+	local targetEntry, stopDig, modeLabel = self:SelectTarget(rootPos, field, currentClock)
+	self.stopDig = stopDig
+
+	if not targetEntry then
+		self:ZeroTorque()
+		self:SetStatusText(modeLabel == "waiting" and "Target: Holding for refresh" or ("Target: Idle in " .. field.Name))
+		return
+	end
+
+	local dx = targetEntry.pos.X - rootPos.X
+	local dz = targetEntry.pos.Z - rootPos.Z
+	if dx * dx + dz * dz <= 0.01 then
+		self:ZeroTorque()
+		self:SetStatusText("Target: On flame")
+		return
+	end
+
+	if cfg.flames.shiftLockCompat then
+		self:SuppressAutoRotate(hum)
+	else
+		self:RestoreAutoRotate()
+	end
+
+	local flatTarget = Vector3.new(targetEntry.pos.X, rootPos.Y, targetEntry.pos.Z)
+	local lookCf = CFrame.lookAt and CFrame.lookAt(rootPos, flatTarget) or CFrame.new(rootPos, flatTarget)
+	local gyro = self:EnsureGyro(rootPart)
+	if gyro then
+		pcall(function()
+			gyro.MaxTorque = Vector3.new(0, math.huge, 0)
+			gyro.CFrame = lookCf
+		end)
+	end
+	if cfg.flames.shiftLockCompat and isShiftLockActive() and not isClimbing(hum) then
+		pcall(function()
+			rootPart.CFrame = lookCf
+		end)
+	end
+
+	self:SetStatusText(string.format("Target: %s (%.1fs, %.0fst)", modeLabel == "refresh" and "Refreshing" or "Facing", targetEntry.age, targetEntry.dist))
+end
+
+function flameController:SetEnabled(enabled)
+	self:UnbindRenderStep()
+	if not enabled then
+		self:ReleaseGyro()
+		self.stopDig = false
+		self:SetStatusText("Target: Disabled")
+		return
+	end
+	local pf = workspace:FindFirstChild("PlayerFlames")
+	if pf and not connections:Get("flamesAdded") then
+		self:BindFolder(pf)
+	elseif pf then
+		for _, child in ipairs(pf:GetChildren()) do
+			if self.tracked[child] == nil then
+				self.tracked[child] = false
+			end
+		end
+	end
+	self:Step(os.clock())
+	if RunService.BindToRenderStep then
+		local okPrio, camPrio = pcall(function()
+			return Enum.RenderPriority.Camera.Value
+		end)
+		local priority = (okPrio and type(camPrio) == "number") and (camPrio + 1) or 201
+		local okBind = pcall(function()
+			RunService:BindToRenderStep(FLAME_RENDER_STEP_NAME, priority, function()
+				self:Step(os.clock())
+			end)
+		end)
+		if okBind then
+			self.renderBound = true
+			return
+		end
+	end
+	local sig = RunService.RenderStepped or RunService.Heartbeat
+	if sig then
+		connections:Add("flameFace", sig:Connect(function()
+			self:Step(os.clock())
+		end))
+	end
+end
+
+local function syncSmartAutoDig()
+	threads:Cancel("smartAutoDig")
+	if not cfg.flames.smartAutoDig then
+		return
+	end
+	threads:Add("smartAutoDig", function()
+		while cfg.flames.smartAutoDig and not threads.closed do
+			if not (cfg.flames.enabled and flameController.stopDig) and gameApi.LocalCollect then
+				pcall(secureCall, gameApi.LocalCollect)
+			end
 			task.wait(0.1)
 		end
 	end)
@@ -2444,7 +3045,15 @@ controls.highlightNotify = highlightFolder.AddSwitch("Notify On Rare Token", nil
 
 highlightFolder.Toggle(true, true)
 
--- Right Column: Hide Tokens + Puffshroom Transparency
+local worldFolder = assistantTab.AddFolder("World / Performance")
+
+controls.hideDecorations = worldFolder.AddSwitch("Hide Decorations", function(enabled)
+	decorationsController:SetEnabled(enabled)
+end, "decorations", "hide")
+
+worldFolder.Toggle(true, true)
+
+-- Right Column: Hide Tokens + Puffshroom Transparency + Auto Face Flames (BodyGyro)
 local tokensFolder = assistantTab.AddFolder("Hide Tokens", true)
 
 local function onTokenToggleChanged()
@@ -2478,6 +3087,27 @@ puffFolder.AddLabel("Legendary & Mythic always stay 100% visible")
 
 puffFolder.Toggle(true, true)
 
+local flameFolder = assistantTab.AddFolder("Auto Face Flames (BodyGyro)", true)
+local flameStatusLabel = flameFolder.AddLabel("Target: Disabled")
+flameController.statusLabel = flameStatusLabel
+
+controls.flamesEnabled = flameFolder.AddSwitch("Enable Flame Auto-Face", function(enabled)
+	flameController:SetEnabled(enabled)
+end, "flames", "enabled")
+
+controls.flamesShiftLockCompat = flameFolder.AddSwitch("Shift Lock Compatible", nil, "flames", "shiftLockCompat")
+controls.flamesRefreshPriority = flameFolder.AddSwitch("Prioritize Expiring Flames", nil, "flames", "refreshPriority")
+controls.flamesOnlyReady = flameFolder.AddSwitch("Only Face When Ready", nil, "flames", "onlyRefreshReady")
+
+controls.flamesSmartDig = flameFolder.AddSwitch("Smart Auto Dig (Refresh Sync)", function()
+	syncSmartAutoDig()
+end, "flames", "smartAutoDig")
+
+controls.flamesRefreshAge = flameFolder.AddSlider("Refresh Age (secs)", nil, 1.5, 4.5, "flames", "refreshAge", { Left = true, Decimal = true })
+controls.flamesMaxRange = flameFolder.AddSlider("Flame Range (studs)", nil, 15, 45, "flames", "maxRange", { Left = true })
+
+flameFolder.Toggle(true, true)
+
 -- Settings Tab
 local settingsFolder = settingsTab.AddFolder("Assistant")
 
@@ -2502,6 +3132,14 @@ settingsFolder.AddButton("Reset All Settings", function()
 	controls.highlightBeam.Set(cfg.highlights.beam)
 	controls.highlightLabel.Set(cfg.highlights.label)
 	controls.highlightNotify.Set(cfg.highlights.notify)
+	controls.hideDecorations.Set(cfg.decorations.hide)
+	controls.flamesEnabled.Set(cfg.flames.enabled)
+	controls.flamesShiftLockCompat.Set(cfg.flames.shiftLockCompat)
+	controls.flamesRefreshPriority.Set(cfg.flames.refreshPriority)
+	controls.flamesOnlyReady.Set(cfg.flames.onlyRefreshReady)
+	controls.flamesSmartDig.Set(cfg.flames.smartAutoDig)
+	controls.flamesRefreshAge.Set(cfg.flames.refreshAge)
+	controls.flamesMaxRange.Set(cfg.flames.maxRange)
 	controls.hideHoney.Set(cfg.tokens.hideHoney)
 	controls.hideSoftWax.Set(cfg.tokens.hideSoftWax)
 	controls.hideBitterberry.Set(cfg.tokens.hideBitterberry)
@@ -2549,6 +3187,7 @@ local function bindCollectiblesFolder(folder)
 end
 
 bindCollectiblesFolder(workspace:FindFirstChild("Collectibles"))
+flameController:BindFolder(workspace:FindFirstChild("PlayerFlames"))
 
 local function bindPuffFolder(folder)
 	connections:Cancel("puffAdded")
@@ -2586,6 +3225,8 @@ end
 connections:Add("workspaceChildren", workspace.ChildAdded:Connect(function(child)
 	if child.Name == "Collectibles" then
 		bindCollectiblesFolder(child)
+	elseif child.Name == "PlayerFlames" then
+		flameController:BindFolder(child)
 	elseif child.Name == "Happenings" then
 		bindPuffFolder(child:FindFirstChild("Puffshrooms"))
 		connections:Add("happeningsAdded", child.ChildAdded:Connect(function(sub)
@@ -2596,6 +3237,12 @@ connections:Add("workspaceChildren", workspace.ChildAdded:Connect(function(child
 				end
 			end
 		end))
+	end
+end))
+
+connections:Add("workspaceRemoved", workspace.ChildRemoved:Connect(function(child)
+	if child.Name == "PlayerFlames" then
+		flameController:BindFolder(nil)
 	end
 end))
 
@@ -2720,6 +3367,9 @@ cleanup = function()
 	threads:CancelAll()
 	connections:CancelAll()
 	walkSpeedController:Restore()
+	decorationsController:Restore()
+	flameController:UnbindRenderStep()
+	flameController:ReleaseGyro()
 	tokenHider:RestoreAll()
 	tokenHighlighter:ClearAll()
 	puffVisuals:RestoreAll()
@@ -2747,6 +3397,8 @@ if isTestHarness then
 	api.tokenHighlighter = tokenHighlighter
 	api.puffVisuals = puffVisuals
 	api.walkSpeedController = walkSpeedController
+	api.decorationsController = decorationsController
+	api.flameController = flameController
 	api.monitorState = monitorState
 	api.monitorFrame = monitorFrame
 	api.monitorMainText = monitorMainText

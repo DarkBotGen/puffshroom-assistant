@@ -414,4 +414,132 @@ assert(math.abs(rTop.LocalTransparencyModifier - 0.5) < 1e-6)
 assert(math.abs(eTop.LocalTransparencyModifier - 0.3) < 1e-6)
 assert(mTop.LocalTransparencyModifier == 0 and mDecal.Transparency == 0 and mEmit.Enabled == true, "Mythic puffshrooms must stay 100% visible")
 
-print("PASS: Puffshroom Assistant walkspeed, token hiding, puffshroom transparency, and mythic parsing verified")
+-- 4. Reversible Hide Decorations unit test
+local decWs = makeMockInstance("Folder", "Workspace")
+local decAmulets = decWs:AddChild(makeMockInstance("Folder", "Amulets"))
+local decMap = decWs:AddChild(makeMockInstance("Folder", "Map"))
+local decFences = decMap:AddChild(makeMockInstance("Folder", "Fences"))
+local decTerrain = decMap:AddChild(makeMockInstance("Part", "Terrain"))
+local decPlats = decWs:AddChild(makeMockInstance("Folder", "HivePlatforms"))
+local decSlot = decPlats:AddChild(makeMockInstance("Model", "Slot1"))
+local decPlat = decSlot:AddChild(makeMockInstance("Part", "Platform"))
+decPlat.CanCollide = true
+local decHive = decSlot:AddChild(makeMockInstance("Model", "Hive"))
+local decPlayerRef = decSlot:AddChild(makeMockInstance("ObjectValue", "PlayerRef"))
+local decExtra = decSlot:AddChild(makeMockInstance("Part", "SlotDeco"))
+local decPuffs = decWs:AddChild(makeMockInstance("Folder", "Happenings"))
+
+local detachedDecos = {}
+local savedDecoPlats = {}
+local function detachMock(obj)
+	if not obj or not obj.Parent then return end
+	local parent = obj.Parent
+	table.insert(detachedDecos, { inst = obj, parent = parent })
+	parent:RemoveChild(obj)
+end
+detachMock(decWs:FindFirstChild("Amulets"))
+detachMock(decMap:FindFirstChild("Fences"))
+for _, item in ipairs(decSlot:GetChildren()) do
+	if item.Name == "Platform" then
+		savedDecoPlats[item] = item.CanCollide
+		item.CanCollide = false
+	elseif item.Name ~= "Hive" and item.Name ~= "PlayerRef" then
+		detachMock(item)
+	end
+end
+assert(decAmulets.Parent == nil and decFences.Parent == nil and decExtra.Parent == nil, "decorations detached")
+assert(decTerrain.Parent == decMap and decHive.Parent == decSlot and decPlayerRef.Parent == decSlot and decPuffs.Parent == decWs, "world terrain/hive/puffshrooms kept")
+assert(decPlat.CanCollide == false, "hive platform collision disabled")
+for i = #detachedDecos, 1, -1 do
+	detachedDecos[i].parent:AddChild(detachedDecos[i].inst)
+end
+for plat, origCol in pairs(savedDecoPlats) do
+	plat.CanCollide = origCol
+end
+assert(decAmulets.Parent == decWs and decFences.Parent == decMap and decExtra.Parent == decSlot and decPlat.CanCollide == true, "decorations and collision restored")
+
+-- 5. BodyGyro Flame Auto-Face, Refresh Priority & Shift Lock AutoRotate tests
+local flameCfg = { refreshPriority = true, onlyRefreshReady = false, refreshAge = 3.0, maxRange = 30 }
+local function makeFlame(pos, sizeVal, greenVal)
+	local f = makeMockInstance("Part", "Flame")
+	f.Position = pos
+	local pf = f:AddChild(makeMockInstance("ParticleEmitter", "PF"))
+	pf.Size = { Keypoints = { { Value = sizeVal } } }
+	pf.Color = { Keypoints = { { Value = { R = 1, G = greenVal, B = 0 } } } }
+	return f
+end
+local flDark = makeFlame({ X = -292, Y = 22, Z = 120 }, 1.65, 0.1)
+local flTiny = makeFlame({ X = -292, Y = 22, Z = 122 }, 1.35, 0.8)
+local flFresh = makeFlame({ X = -293, Y = 22, Z = 120 }, 1.70, 0.8)
+local flOld = makeFlame({ X = -285, Y = 22, Z = 120 }, 1.55, 0.8)
+local flOther = makeFlame({ X = -480, Y = 122, Z = 530 }, 1.60, 0.8)
+for _, fl in ipairs({ flDark, flTiny, flFresh, flOld, flOther }) do
+	fl.Parent = true
+end
+local flameTimes = { [flDark] = 6.0, [flTiny] = 6.0, [flFresh] = 9.0, [flOld] = 6.4, [flOther] = 6.0 }
+local function pickFlame(rPos, field, curNow)
+	local hasFresh, bestReady, bestFallback = false, nil, nil
+	for fl, t0 in pairs(flameTimes) do
+		if fl.Parent then
+			local pf = fl:FindFirstChild("PF")
+			local s = pf.Size.Keypoints[1].Value
+			local g = pf.Color.Keypoints[1].Value.G
+			if s > 1.4 and g > 0.2 then
+				local dx = fl.Position.X - rPos.X
+				local dz = fl.Position.Z - rPos.Z
+				local dist = math.sqrt(dx * dx + dz * dz)
+				local flField = math.abs(fl.Position.X - (-300)) <= 60 and fieldRose or fieldPepper
+				if dist < flameCfg.maxRange and flField == field then
+					local age = curNow - t0
+					if age < flameCfg.refreshAge then hasFresh = true end
+					if dist > 4 then
+						if age >= flameCfg.refreshAge and (not bestReady or age > bestReady.age) then
+							bestReady = { obj = fl, age = age, dist = dist }
+						end
+						if not bestFallback or dist < bestFallback.dist then
+							bestFallback = { obj = fl, age = age, dist = dist }
+						end
+					end
+				end
+			end
+		end
+	end
+	if flameCfg.refreshPriority then
+		if bestReady then return bestReady.obj, false end
+		if flameCfg.onlyRefreshReady then return nil, hasFresh end
+		return bestFallback and bestFallback.obj or nil, hasFresh
+	end
+	return bestFallback and bestFallback.obj or nil, false
+end
+
+local rootPos = { X = -300, Y = 22, Z = 120 }
+local picked, stopDig = pickFlame(rootPos, fieldRose, 10.0)
+assert(picked == flOld and stopDig == false, "should prioritize 3.6s expiring flame over 1.0s fresh flame")
+flameTimes[flOld] = nil
+picked, stopDig = pickFlame(rootPos, fieldRose, 10.0)
+assert(picked == flFresh and stopDig == true, "with fresh flame in range and no ready flame, stopDig=true pauses auto dig")
+flameCfg.onlyRefreshReady = true
+picked, stopDig = pickFlame(rootPos, fieldRose, 10.0)
+assert(picked == nil and stopDig == true, "onlyRefreshReady holds facing torque when only fresh flames exist")
+
+local slHum = { AutoRotate = true, Parent = true }
+local savedAR, managedAR = nil, nil
+local function suppressAR(h)
+	if managedAR ~= h then
+		savedAR = h.AutoRotate
+		managedAR = h
+	end
+	h.AutoRotate = false
+end
+local function restoreAR()
+	if managedAR and managedAR.Parent and savedAR ~= nil then
+		managedAR.AutoRotate = savedAR
+	end
+	managedAR, savedAR = nil, nil
+end
+suppressAR(slHum)
+assert(slHum.AutoRotate == false, "Shift Lock compat suppresses AutoRotate when facing flame")
+restoreAR()
+assert(slHum.AutoRotate == true, "AutoRotate restores immediately when idle or released")
+
+print("PASS: Puffshroom Assistant walkspeed, token hiding, puffshroom transparency, mythic parsing, hide decorations, and flame bodygyro verified")
