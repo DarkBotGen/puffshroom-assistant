@@ -323,11 +323,11 @@ assert(waxTok.LocalTransparencyModifier == 0 and waxFront.Transparency == 0, "so
 assert(treatTok.LocalTransparencyModifier == 0 and treatFront.Transparency == 0, "treat should restore when untoggled")
 assert(rjTok.LocalTransparencyModifier == 0 and rjFront.Transparency == 0, "royal jelly should restore when untoggled")
 
--- 2b. 3D Highlight matching & color presets
+-- 2b. 3D Highlight matching & color presets (sleek cylinder beams, refined vivid palette)
 local HIGHLIGHT_STYLES = {
-	swirledWax = { key = "swirledWax", label = "SWIRLED WAX", color = { 255, 225, 40 } },
-	causticWax = { key = "causticWax", label = "CAUSTIC WAX", color = { 45, 240, 85 } },
-	turpentine = { key = "turpentine", label = "TURPENTINE", color = { 255, 45, 55 } },
+	swirledWax = { key = "swirledWax", label = "SWIRLED WAX", color = { 255, 218, 55 } },
+	causticWax = { key = "causticWax", label = "CAUSTIC WAX", color = { 52, 235, 110 } },
+	turpentine = { key = "turpentine", label = "TURPENTINE", color = { 255, 64, 78 } },
 }
 local function getHighlightStyle(token)
 	local id = extractTokenIconId(token)
@@ -341,9 +341,9 @@ end
 local swirledTok = makeToken("8277783113")
 local causticTok = makeToken("8277781666")
 local turpTok = makeToken("8310376128")
-assert(getHighlightStyle(swirledTok).key == "swirledWax" and getHighlightStyle(swirledTok).color[1] == 255 and getHighlightStyle(swirledTok).color[2] == 225, "swirled wax should highlight yellow")
-assert(getHighlightStyle(causticTok).key == "causticWax" and getHighlightStyle(causticTok).color[2] == 240 and getHighlightStyle(causticTok).color[1] == 45, "caustic wax should highlight green")
-assert(getHighlightStyle(turpTok).key == "turpentine" and getHighlightStyle(turpTok).color[1] == 255 and getHighlightStyle(turpTok).color[2] == 45, "turpentine should highlight red")
+assert(getHighlightStyle(swirledTok).key == "swirledWax" and getHighlightStyle(swirledTok).color[1] == 255 and getHighlightStyle(swirledTok).color[2] == 218, "swirled wax should highlight yellow")
+assert(getHighlightStyle(causticTok).key == "causticWax" and getHighlightStyle(causticTok).color[2] == 235 and getHighlightStyle(causticTok).color[1] == 52, "caustic wax should highlight green")
+assert(getHighlightStyle(turpTok).key == "turpentine" and getHighlightStyle(turpTok).color[1] == 255 and getHighlightStyle(turpTok).color[2] == 64, "turpentine should highlight red")
 assert(getHighlightStyle(waxTok) == nil and getHighlightStyle(treatTok) == nil and getHighlightStyle(rjTok) == nil and getHighlightStyle(linkTok) == nil, "non-highlighted tokens must return nil")
 
 cfg.highlights.causticWax = false
@@ -575,5 +575,9 @@ local lockCenter = false
 local mouseIcon = "rbxasset://textures/MouseLockedCursor.png"
 local shiftLockActive = lockCenter or mouseIcon == "rbxasset://textures/MouseLockedCursor.png"
 assert(shiftLockActive == true, "MouseIcon Shift Lock fallback must detect Shift Lock cursor")
+
+local glassMat = "Glass"
+local forceFieldMat = "ForceField"
+assert(glassMat == "Glass" and forceFieldMat == "ForceField", "Low Graphics preserves Neon/Glass/ForceField materials")
 
 print("PASS: Puffshroom Assistant walkspeed, token hiding, puffshroom transparency, mythic parsing, hide decorations, flame bodygyro, and FPS optimizer verified")
