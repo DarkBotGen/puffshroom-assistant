@@ -20,4 +20,9 @@ The loader resolves the latest `main` commit SHA from GitHub and fetches its imm
 - **Puffshroom Transparency:** Adjust transparency for Common, Rare, and Epic puffshrooms while keeping Legendary and Mythic puffshrooms 100% visible
 - **Mythic Monitor HUD:** Top-of-screen live indicator and spawn notification whenever a Mythic puffshroom is present on the map
 
-> Offline compilation and unit tests pass. Live in-game Roblox behavior has not been verified yet.
+> **Performance & FPS Optimizer (`World / Performance`)**:
+> - Reversible **Low Graphics / Anti-Lag** (disables shadows, fog, post-effects, water ripples, terrain grass, `PollenPopUps`, sets `Level01`, simplifies non-`Neon` workspace parts while preserving all highlight/drop beams)
+> - Reversible **Hide Bees**, **Hide Other Players**, **Hide Flowers**, **Hide Field Balloons**, and **Filter Particles (Keep Key FX)** (with **Keep Spore Trails** toggle)
+> - Cached hot-path lookups (`puffMetaCache`, `puffVisuals`, `tokenHider`, `flameController` 20Hz target scan + Shift Lock cursor/MouseBehavior sync)
+
+> Offline compilation, static analysis, unit tests, and headless E2E checks pass. Live in-game Roblox behavior has not been verified yet.

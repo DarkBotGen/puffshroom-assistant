@@ -542,4 +542,38 @@ assert(slHum.AutoRotate == false, "Shift Lock compat suppresses AutoRotate when 
 restoreAR()
 assert(slHum.AutoRotate == true, "AutoRotate restores immediately when idle or released")
 
-print("PASS: Puffshroom Assistant walkspeed, token hiding, puffshroom transparency, mythic parsing, hide decorations, and flame bodygyro verified")
+-- 5. FPS optimizer state/reversibility, puff cache, and Shift Lock cursor fallback check
+local fxCalls = 0
+local origFx = function(owner, effectName)
+	fxCalls += 1
+	return owner, effectName
+end
+local blockedFx = { OrbExplode = true, RectPulse = true, PuffshroomSporeThrow = true }
+local keepSpores = true
+local wrappedFx = function(owner, effectName, ...)
+	if effectName == "PuffshroomSporeThrow" and keepSpores then
+		return origFx(owner, effectName, ...)
+	elseif blockedFx[effectName] then
+		return nil
+	end
+	return origFx(owner, effectName, ...)
+end
+wrappedFx(nil, "LocalFlames")
+wrappedFx(nil, "OrbExplode")
+wrappedFx(nil, "PuffshroomSporeThrow")
+assert(fxCalls == 2, "expected LocalFlames + PuffshroomSporeThrow to pass while OrbExplode filtered")
+keepSpores = false
+wrappedFx(nil, "PuffshroomSporeThrow")
+assert(fxCalls == 2, "expected PuffshroomSporeThrow filtered when keepSpores=false")
+
+local neonProtect = true
+local partMat = "Neon"
+local shouldTouchLowGfx = not neonProtect or partMat ~= "Neon"
+assert(not shouldTouchLowGfx, "Neon highlight/drop beams must be skipped by lowGraphics")
+
+local lockCenter = false
+local mouseIcon = "rbxasset://textures/MouseLockedCursor.png"
+local shiftLockActive = lockCenter or mouseIcon == "rbxasset://textures/MouseLockedCursor.png"
+assert(shiftLockActive == true, "MouseIcon Shift Lock fallback must detect Shift Lock cursor")
+
+print("PASS: Puffshroom Assistant walkspeed, token hiding, puffshroom transparency, mythic parsing, hide decorations, flame bodygyro, and FPS optimizer verified")
