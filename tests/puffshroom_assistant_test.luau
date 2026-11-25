@@ -592,19 +592,44 @@ end
 collectStickerIds({ ["Wavy Purple Hive"] = { CosmeticType = "Hive Skin", Icon = "rbxassetid://16748932100" } })
 assert(wavyIds["16748932100"] == true, "StickerTypes parsing must capture Wavy Purple Hive Skin ID")
 
-local function spawnFilter(data, allowAllStickers)
-	local id = data and data.Icon and string.match(tostring(data.Icon), "%d+") or nil
-	if id == "16748932100" or id == "8310376128" then
-		return true
-	end
-	if allowAllStickers and data and data.Rainbow == true then
-		return true
-	end
+local lootDrops = {
+	["1472135114"] = true, -- Honey
+	["2028574353"] = true, -- Treat
+	["8277780065"] = true, -- Hard Wax (EggTypes)
+	["8310376128"] = true, -- Turpentine
+	["16748932100"] = true, -- Wavy Purple Hive
+}
+local beeProtected = {
+	["1629547638"] = true, -- Token Link
+	["1629649299"] = true, -- Focus
+}
+local function isLootDropToken(id, isSticker)
+	if isSticker == true then return true end
+	if not id or beeProtected[id] then return false end
+	return lootDrops[id] == true
+end
+local function isHighlighted(id, isSticker, allowAllStickers)
+	if id == "16748932100" or id == "8310376128" then return true end
+	if allowAllStickers and isSticker then return true end
 	return false
 end
-assert(spawnFilter({ Icon = "rbxassetid://1472135114" }, false) == false, "onlyHighlightedTokens culls common non-highlighted Spawn calls")
-assert(spawnFilter({ Icon = "rbxassetid://16748932100" }, false) == true, "onlyHighlightedTokens keeps Wavy Purple Hive Spawn calls")
-assert(spawnFilter({ Icon = "rbxassetid://999888777", Rainbow = true }, true) == true, "onlyHighlightedTokens keeps Rainbow stickers when allStickers enabled")
+local function spawnFilter(data, allowAllStickers)
+	local id = data and data.Icon and string.match(tostring(data.Icon), "%d+") or nil
+	local isSticker = data and data.Rainbow == true or false
+	if isHighlighted(id, isSticker, allowAllStickers) then
+		return true
+	end
+	return not isLootDropToken(id, isSticker)
+end
+assert(spawnFilter({ Icon = "rbxassetid://1472135114" }, false) == false, "Hide Loot culls Honey loot Spawn calls")
+assert(spawnFilter({ Icon = "rbxassetid://8277780065" }, false) == false, "Hide Loot culls EggTypes loot Spawn calls")
+assert(spawnFilter({ Icon = "rbxassetid://999888777", Rainbow = true }, false) == false, "Hide Loot culls non-highlighted Rainbow sticker when allStickers=false")
+assert(spawnFilter({ Icon = "rbxassetid://16748932100" }, false) == true, "Hide Loot keeps Wavy Purple Hive Spawn calls")
+assert(spawnFilter({ Icon = "rbxassetid://8310376128" }, false) == true, "Hide Loot keeps Turpentine Spawn calls")
+assert(spawnFilter({ Icon = "rbxassetid://999888777", Rainbow = true }, true) == true, "Hide Loot keeps Rainbow stickers when allStickers enabled")
+assert(spawnFilter({ Icon = "rbxassetid://1629547638" }, false) == true, "Hide Loot keeps Token Link bee ability Spawn calls")
+assert(spawnFilter({ Icon = "rbxassetid://1629649299" }, false) == true, "Hide Loot keeps Focus bee ability Spawn calls")
+assert(spawnFilter({ Icon = "rbxassetid://777666555" }, false) == true, "Hide Loot keeps unlisted bee ability Spawn calls")
 
 local function puffAlpha(rarity, hideModels, sliderAlpha)
 	if rarity == "Mythic" then return 0 end

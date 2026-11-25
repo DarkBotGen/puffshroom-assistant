@@ -737,6 +737,7 @@ local ULTRA_ALLOWED_LOCAL_FX = {
 }
 
 local matchHighlightStyleById -- forward declared for token spawn filtering
+local isLootDropToken -- forward declared for selective loot culling
 local tokenHider -- forward declared for token culling refresh
 
 local function extractLocalFxName(arg1, arg2)
@@ -1400,8 +1401,11 @@ function fpsOptimizer:SetOnlyHighlightedTokens(enabled)
 			local iconRaw = tokenData.Icon
 			local iconId = iconRaw and string.match(tostring(iconRaw), "%d+") or nil
 			local isSticker = tokenData.Rainbow == true
-			if matchHighlightStyleById then
-				return matchHighlightStyleById(iconId, isSticker) ~= nil
+			if matchHighlightStyleById and matchHighlightStyleById(iconId, isSticker) ~= nil then
+				return true
+			end
+			if isLootDropToken then
+				return not isLootDropToken(iconId, isSticker)
 			end
 			return true
 		end
@@ -2152,6 +2156,93 @@ local tokenIds = {
 		["8310376128"] = true, -- Turpentine
 	},
 	wavyPurpleHive = {},
+	lootDrops = {
+		["1472135114"] = true, -- Honey Token
+		["1952683491"] = true, -- Honey Icon
+		["8277778300"] = true, -- Soft Wax
+		["8277780065"] = true, -- Hard Wax
+		["8277783113"] = true, -- Swirled Wax
+		["8277781666"] = true, -- Caustic Wax
+		["8310376128"] = true, -- Turpentine
+		["4483236276"] = true, -- Bitterberry
+		["6087985073"] = true, -- Bitterberry alt
+		["6087992633"] = true, -- Neonberry
+		["2028574353"] = true, -- Treat
+		["2028603146"] = true, -- Star Treat
+		["1471882621"] = true, -- Royal Jelly
+		["2319943273"] = true, -- Star Jelly
+		["1952682401"] = true, -- Sunflower Seed
+		["1952679735"] = true, -- Strawberry
+		["1952681305"] = true, -- Pineapple
+		["1952680613"] = true, -- Blueberry
+		["1952681863"] = true, -- Coconut
+		["6087969886"] = true, -- Snowflake
+		["6077173317"] = true, -- Gingerbread Bear
+		["1674871631"] = true, -- Ticket
+		["4520739302"] = true, -- Cloud Vial
+		["1838129169"] = true, -- Gumdrops
+		["2314214749"] = true, -- Stinger
+		["2863122826"] = true, -- Micro-Converter
+		["2863468407"] = true, -- Field Dice
+		["1471848094"] = true,
+		["1471849394"] = true,
+		["1471850677"] = true,
+		["1987253833"] = true,
+		["1987257040"] = true,
+		["1987255318"] = true,
+		["6134473023"] = true,
+		["2495935291"] = true,
+		["2495936060"] = true,
+		["4483267595"] = true,
+		["3030569073"] = true,
+		["2545746569"] = true,
+		["2529092020"] = true,
+		["2504978518"] = true,
+		["2584584968"] = true,
+		["2542899798"] = true,
+		["8054996680"] = true,
+		["3027672238"] = true,
+		["6299503651"] = true,
+		["2306224708"] = true,
+	},
+}
+
+local BEE_ABILITY_PROTECTED_IDS = {
+	["1629547638"] = true, -- Token Link
+	["1442863423"] = true, -- Blue Boost
+	["1442859163"] = true, -- Red Boost
+	["65867881"] = true,   -- Haste
+	["1629649299"] = true, -- Focus
+	["1472256444"] = true, -- Baby Love
+	["253828517"] = true,  -- Melody
+	["8083436978"] = true, -- Inflate Balloon
+	["8083943936"] = true, -- Surprise Party
+	["4889322534"] = true, -- Fuzz Bombs
+	["4889470194"] = true, -- Pollen Haze
+	["8173559749"] = true, -- Target Practice
+	["4519549299"] = true, -- Inferno
+	["4528208186"] = true, -- Flame Fuel
+	["4528414666"] = true, -- Summon Frog
+	["4519523935"] = true, -- Triangulate
+	["2499540966"] = true, -- Pollen Mark
+	["2499514197"] = true, -- Honey Mark
+	["4528379338"] = true, -- Mark Surge
+	["1874564120"] = true, -- Festive Gift
+	["3582519526"] = true, -- Tornado
+	["5877939956"] = true, -- Smiley
+	["2319083910"] = true,
+	["2000457501"] = true,
+	["1104415222"] = true,
+	["1472425802"] = true,
+	["1472580249"] = true,
+	["1472532912"] = true,
+	["2032949183"] = true,
+	["1472491940"] = true,
+	["1489734171"] = true,
+	["1837410537"] = true,
+	["2652364563"] = true,
+	["2652424740"] = true,
+	["6077288982"] = true,
 }
 
 -- Enrich token IDs directly from EggTypes and StickerTypes if available in game
@@ -2210,6 +2301,7 @@ do
 		end)
 		if ok and type(types) == "table" then
 			for key, info in pairs(types) do
+				addIdsFromInfo(tokenIds.lootDrops, info)
 				local normKey = string.lower(tostring(key))
 				local disp = type(info) == "table" and info.DisplayName and string.lower(tostring(info.DisplayName)) or ""
 				if normKey == "softwax" or disp == "soft wax" then
@@ -2241,12 +2333,26 @@ do
 		end)
 		if ok and type(sTypes) == "table" then
 			for key, info in pairs(sTypes) do
+				addIdsFromInfo(tokenIds.lootDrops, info)
 				if isWavyPurpleEntry(key, info) then
 					addIdsFromInfo(tokenIds.wavyPurpleHive, info)
 				end
 			end
 		end
 	end
+end
+
+isLootDropToken = function(iconId, isSticker)
+	if isSticker == true then
+		return true
+	end
+	if not iconId then
+		return false
+	end
+	if BEE_ABILITY_PROTECTED_IDS[iconId] then
+		return false
+	end
+	return tokenIds.lootDrops[iconId] == true
 end
 
 local tokenHighlighter
@@ -2297,13 +2403,14 @@ function tokenHider:AnyHideEnabled()
 end
 
 function tokenHider:ShouldHide(token)
+	local iconId = extractTokenIconId(token)
+	local isSticker = token and token:FindFirstChild("Spots") ~= nil or false
 	if cfg.perf.onlyHighlightedTokens then
 		if tokenHighlighter and tokenHighlighter:GetHighlightStyle(token) ~= nil then
 			return false
 		end
-		return true
+		return isLootDropToken(iconId, isSticker)
 	end
-	local iconId = extractTokenIconId(token)
 	if not iconId then
 		return false
 	end
@@ -4554,7 +4661,7 @@ controls.ultraFps = worldFolder.AddSwitch("Ultra FPS Mode (Puff Party)", functio
 		controls.hideBees.Set(true)
 		controls.keepSporeTrails.Set(false)
 		controls.filterParticles.Set(true)
-		controls.hidePlayers.Set(true)
+		controls.hidePlayers.Set(false)
 		controls.hideFlowers.Set(true)
 		controls.hideBalloons.Set(true)
 		controls.onlyHighlightedTokens.Set(true)
@@ -4607,7 +4714,7 @@ controls.hideBalloons = worldFolder.AddSwitch("Hide Field Balloons", function(en
 	fpsOptimizer:SetHideBalloons(enabled)
 end, "perf", "hideBalloons")
 
-controls.onlyHighlightedTokens = worldFolder.AddSwitch("Only Show Highlighted Tokens", function(enabled)
+controls.onlyHighlightedTokens = worldFolder.AddSwitch("Hide Loot (Keep Bee + Rare)", function(enabled)
 	fpsOptimizer:SetOnlyHighlightedTokens(enabled)
 end, "perf", "onlyHighlightedTokens")
 
