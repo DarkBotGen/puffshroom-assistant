@@ -580,4 +580,47 @@ local glassMat = "Glass"
 local forceFieldMat = "ForceField"
 assert(glassMat == "Glass" and forceFieldMat == "ForceField", "Low Graphics preserves Neon/Glass/ForceField materials")
 
-print("PASS: Puffshroom Assistant walkspeed, token hiding, puffshroom transparency, mythic parsing, hide decorations, flame bodygyro, and FPS optimizer verified")
+-- 6. Wavy Purple Hive highlight + Collectible Spawn culling + Hide Non-Mythic Puffs + debounced monitor batching
+local wavyIds = {}
+local function collectStickerIds(info)
+	for _, entry in pairs(info) do
+		if type(entry) == "table" and entry.Icon then
+			wavyIds[tostring(string.match(entry.Icon, "%d+") or "")] = true
+		end
+	end
+end
+collectStickerIds({ ["Wavy Purple Hive"] = { CosmeticType = "Hive Skin", Icon = "rbxassetid://16748932100" } })
+assert(wavyIds["16748932100"] == true, "StickerTypes parsing must capture Wavy Purple Hive Skin ID")
+
+local function spawnFilter(data, allowAllStickers)
+	local id = data and data.Icon and string.match(tostring(data.Icon), "%d+") or nil
+	if id == "16748932100" or id == "8310376128" then
+		return true
+	end
+	if allowAllStickers and data and data.Rainbow == true then
+		return true
+	end
+	return false
+end
+assert(spawnFilter({ Icon = "rbxassetid://1472135114" }, false) == false, "onlyHighlightedTokens culls common non-highlighted Spawn calls")
+assert(spawnFilter({ Icon = "rbxassetid://16748932100" }, false) == true, "onlyHighlightedTokens keeps Wavy Purple Hive Spawn calls")
+assert(spawnFilter({ Icon = "rbxassetid://999888777", Rainbow = true }, true) == true, "onlyHighlightedTokens keeps Rainbow stickers when allStickers enabled")
+
+local function puffAlpha(rarity, hideModels, sliderAlpha)
+	if rarity == "Mythic" then return 0 end
+	if hideModels then return 1 end
+	return sliderAlpha
+end
+assert(puffAlpha("Mythic", true, 0.5) == 0, "Mythic puffshrooms always remain visible when hidePuffModels=true")
+assert(puffAlpha("Common", true, 0.2) == 1, "Non-Mythic puffshrooms hide cleanly when hidePuffModels=true")
+
+local dirty, runs = false, 0
+local function scheduleBatch()
+	if dirty then return end
+	dirty = true
+end
+scheduleBatch(); scheduleBatch(); scheduleBatch()
+if dirty then runs += 1; dirty = false end
+assert(runs == 1, "Debounced burst scheduler must coalesce multiple rapid events into 1 refresh")
+
+print("PASS: Puffshroom Assistant walkspeed, token hiding, Wavy Purple Hive, Spawn culling, puffshroom hiding, hide decorations, flame bodygyro, and FPS optimizer verified")

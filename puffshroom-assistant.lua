@@ -89,6 +89,8 @@ local defaultCfg = {
 		turpentine = true,
 		causticWax = true,
 		swirledWax = true,
+		wavyPurpleHive = true,
+		allStickers = false,
 		beam = true,
 		label = true,
 		notify = true,
@@ -108,6 +110,7 @@ local defaultCfg = {
 		hide = false,
 	},
 	perf = {
+		ultraFps = false,
 		lowGraphics = false,
 		hideBees = false,
 		filterParticles = false,
@@ -115,6 +118,8 @@ local defaultCfg = {
 		hidePlayers = false,
 		hideFlowers = false,
 		hideBalloons = false,
+		onlyHighlightedTokens = false,
+		hidePuffModels = false,
 	},
 	flames = {
 		enabled = false,
@@ -295,6 +300,23 @@ do
 		local ok, mod = pcall(require, eggMod)
 		if ok and type(mod) == "table" and type(mod.GetTypes) == "function" then
 			gameApi.EggTypes = mod.GetTypes
+		end
+	end
+
+	local stickersFolder = ReplicatedStorage:FindFirstChild("Stickers")
+	local stickerTypesMod = stickersFolder and stickersFolder:FindFirstChild("StickerTypes")
+	if stickerTypesMod then
+		local ok, mod = pcall(require, stickerTypesMod)
+		if ok and type(mod) == "table" and type(mod.GetTypes) == "function" then
+			gameApi.StickerTypes = mod.GetTypes
+		end
+	end
+
+	local collectorsAnimMod = ReplicatedStorage:FindFirstChild("CollectiblesAnimator")
+	if collectorsAnimMod then
+		local ok, mod = pcall(require, collectorsAnimMod)
+		if ok and type(mod) == "table" and type(mod.Spawn) == "function" then
+			gameApi.CollectiblesAnimator = mod
 		end
 	end
 
@@ -700,20 +722,22 @@ local BLOCKED_LOCAL_FX = {
 	SpotlightBeam = true,
 	StarSaw = true,
 	StarShowerGuide = true,
-	StickerTokenBeam = true,
 	SweepArch = true,
 	Triangulate = true,
 	WaterRipple = true,
 }
 
-local LOW_GFX_SKIP_FOLDERS = {
-	Collectibles = true,
-	PlayerFlames = true,
-	Particles = true,
-	Happenings = true,
-	PuffAssistantTokenHighlights = true,
-	RbcHelperSmileyHighlights = true,
+local ULTRA_ALLOWED_LOCAL_FX = {
+	LocalFlames = true,
+	LocalTargetPracticeBeam = true,
+	["Precise Shot"] = true,
+	PrecisionPopUp = true,
+	CogSawProjectile = true,
+	StickerTokenBeam = true,
 }
+
+local matchHighlightStyleById -- forward declared for token spawn filtering
+local tokenHider -- forward declared for token culling refresh
 
 local function extractLocalFxName(arg1, arg2)
 	if type(arg1) == "string" then
@@ -753,6 +777,7 @@ local fpsOptimizer = {
 	savedLightingIBL = nil,
 	savedLightingEffects = {},
 	savedAtmospheres = {},
+	savedClouds = {},
 	savedTerrain = nil,
 	savedQualityLevel = nil,
 	savedPollenPopUpSetting = nil,
@@ -764,10 +789,14 @@ local fpsOptimizer = {
 	detachedBeeSet = {},
 	hideBeesActive = false,
 
-	savedParticles = {},
+	savedParticles = setmetatable({}, { __mode = "k" }),
 	filterParticlesActive = false,
 	installedFxWrapper = nil,
 	origFxClientRun = nil,
+
+	onlyHighlightedTokensActive = false,
+	installedSpawnWrapper = nil,
+	origTokenSpawn = nil,
 
 	savedPlayers = {},
 	playerCharWatched = {},
@@ -819,7 +848,6 @@ end
 function fpsOptimizer:RestoreLowGraphics()
 	self.lowGfxActive = false
 	connections:Cancel("fpsLowGfxLighting")
-	connections:Cancel("fpsLowGfxDescAdded")
 	for inst, props in pairs(self.savedPartVisuals) do
 		if inst and inst.Parent then
 			pcall(function()
@@ -880,6 +908,15 @@ function fpsOptimizer:RestoreLowGraphics()
 		end
 	end
 	table.clear(self.savedAtmospheres)
+
+	for clouds, origEnabled in pairs(self.savedClouds) do
+		if clouds and clouds.Parent then
+			pcall(function()
+				clouds.Enabled = origEnabled
+			end)
+		end
+	end
+	table.clear(self.savedClouds)
 
 	if self.savedTerrain then
 		local t = self.savedTerrain
@@ -1042,6 +1079,18 @@ function fpsOptimizer:SetLowGraphics(enabled)
 			terrain.WaterTransparency = 0
 			terrain.Decoration = false
 		end)
+		local clouds = terrain:FindFirstChildOfClass("Clouds")
+		if clouds and self.savedClouds[clouds] == nil then
+			local okC, origC = pcall(function()
+				return clouds.Enabled
+			end)
+			if okC then
+				self.savedClouds[clouds] = origC
+				pcall(function()
+					clouds.Enabled = false
+				end)
+			end
+		end
 	end
 
 	if self.savedQualityLevel == nil and type(settings) == "function" then
@@ -1066,7 +1115,8 @@ function fpsOptimizer:SetLowGraphics(enabled)
 	end
 
 	for _, topChild in ipairs(workspace:GetChildren()) do
-		if not LOW_GFX_SKIP_FOLDERS[topChild.Name] then
+		local n = topChild.Name
+		if n ~= "Collectibles" and n ~= "PlayerFlames" and n ~= "Particles" and n ~= "Happenings" and n ~= "PuffAssistantTokenHighlights" and n ~= "RbcHelperSmileyHighlights" then
 			if topChild:IsA("BasePart") then
 				self:ApplyLowGraphicsPart(topChild)
 			else
@@ -1077,23 +1127,6 @@ function fpsOptimizer:SetLowGraphics(enabled)
 				end
 			end
 		end
-	end
-
-	connections:Cancel("fpsLowGfxDescAdded")
-	if workspace.DescendantAdded then
-		connections:Add("fpsLowGfxDescAdded", workspace.DescendantAdded:Connect(function(desc)
-			if not self.lowGfxActive or not desc:IsA("BasePart") then
-				return
-			end
-			local p = desc.Parent
-			while p and p ~= workspace do
-				if LOW_GFX_SKIP_FOLDERS[p.Name] then
-					return
-				end
-				p = p.Parent
-			end
-			self:ApplyLowGraphicsPart(desc)
-		end))
 	end
 end
 
@@ -1284,12 +1317,99 @@ function fpsOptimizer:ApplyParticlesFolder()
 	if not connections:Get("fpsParticlesRemoved") then
 		connections:Add("fpsParticlesRemoved", folder.ChildRemoved:Connect(function(child)
 			self.savedParticles[child] = nil
-			for inst in pairs(self.savedParticles) do
-				if not inst.Parent then
-					self.savedParticles[inst] = nil
-				end
-			end
 		end))
+	end
+end
+
+function fpsOptimizer:EnsureTokenSpawnHook()
+	if not gameApi.CollectiblesAnimator or type(gameApi.CollectiblesAnimator.Spawn) ~= "function" then
+		return
+	end
+	if _G.__puffAssistantTokenSpawnHooked then
+		return
+	end
+	if type(hookfunction) == "function" then
+		local okHook = pcall(function()
+			local origFn
+			local hookFn = function(...)
+				local filterFn = _G.__puffAssistantTokenSpawnFilter
+				if filterFn then
+					local okKeep, keep = pcall(filterFn, ...)
+					if okKeep and keep == false then
+						return nil
+					end
+				end
+				return origFn(...)
+			end
+			if newcclosure then
+				hookFn = newcclosure(hookFn)
+			end
+			origFn = hookfunction(gameApi.CollectiblesAnimator.Spawn, hookFn)
+		end)
+		if okHook then
+			_G.__puffAssistantTokenSpawnHooked = true
+			_G.__puffAssistantTokenSpawnHookMethod = "hookfunction"
+			self.installedSpawnWrapper = true
+			return
+		end
+	end
+	if not _G.__puffAssistantTokenSpawnOrig then
+		_G.__puffAssistantTokenSpawnOrig = gameApi.CollectiblesAnimator.Spawn
+	end
+	local origFn = _G.__puffAssistantTokenSpawnOrig
+	local wrapper = function(...)
+		local filterFn = _G.__puffAssistantTokenSpawnFilter
+		if filterFn then
+			local okKeep, keep = pcall(filterFn, ...)
+			if okKeep and keep == false then
+				return nil
+			end
+		end
+		return origFn(...)
+	end
+	_G.__puffAssistantTokenSpawnHooked = wrapper
+	_G.__puffAssistantTokenSpawnHookMethod = "table"
+	gameApi.CollectiblesAnimator.Spawn = wrapper
+	self.installedSpawnWrapper = wrapper
+	self.origTokenSpawn = origFn
+end
+
+function fpsOptimizer:UnhookTokenSpawn()
+	self.onlyHighlightedTokensActive = false
+	_G.__puffAssistantTokenSpawnFilter = nil
+	if _G.__puffAssistantTokenSpawnHookMethod == "table" then
+		if gameApi.CollectiblesAnimator and _G.__puffAssistantTokenSpawnOrig and gameApi.CollectiblesAnimator.Spawn == _G.__puffAssistantTokenSpawnHooked then
+			gameApi.CollectiblesAnimator.Spawn = _G.__puffAssistantTokenSpawnOrig
+		end
+		_G.__puffAssistantTokenSpawnHooked = nil
+		_G.__puffAssistantTokenSpawnOrig = nil
+		_G.__puffAssistantTokenSpawnHookMethod = nil
+	end
+	self.installedSpawnWrapper = nil
+	self.origTokenSpawn = nil
+end
+
+function fpsOptimizer:SetOnlyHighlightedTokens(enabled)
+	self.onlyHighlightedTokensActive = enabled == true
+	if enabled then
+		self:EnsureTokenSpawnHook()
+		_G.__puffAssistantTokenSpawnFilter = function(tokenData)
+			if type(tokenData) ~= "table" then
+				return true
+			end
+			local iconRaw = tokenData.Icon
+			local iconId = iconRaw and string.match(tostring(iconRaw), "%d+") or nil
+			local isSticker = tokenData.Rainbow == true
+			if matchHighlightStyleById then
+				return matchHighlightStyleById(iconId, isSticker) ~= nil
+			end
+			return true
+		end
+	else
+		_G.__puffAssistantTokenSpawnFilter = nil
+	end
+	if tokenHider then
+		tokenHider:RefreshAll()
 	end
 end
 
@@ -1307,6 +1427,9 @@ function fpsOptimizer:SetFilterParticles(enabled)
 		end
 		if fxName == "PuffshroomSporeThrow" and cfg.perf.keepSporeTrails then
 			return true
+		end
+		if cfg.perf.ultraFps then
+			return ULTRA_ALLOWED_LOCAL_FX[fxName] == true
 		end
 		if BLOCKED_LOCAL_FX[fxName] then
 			return false
@@ -1546,6 +1669,7 @@ function fpsOptimizer:RestoreAll()
 	self:RestoreBees()
 	self:RestoreParticles()
 	self:UnhookLocalFx()
+	self:UnhookTokenSpawn()
 	self:RestorePlayers()
 	self:RestoreFlowers()
 	self:RestoreBalloons()
@@ -2027,23 +2151,57 @@ local tokenIds = {
 	turpentine = {
 		["8310376128"] = true, -- Turpentine
 	},
+	wavyPurpleHive = {},
 }
 
--- Enrich token IDs directly from EggTypes if available in game
+-- Enrich token IDs directly from EggTypes and StickerTypes if available in game
 do
-	local function addIconFromInfo(bucket, info)
-		if type(info) ~= "table" then
+	local NON_ASSET_KEYS = {
+		order = true,
+		index = true,
+		weight = true,
+		rarity = true,
+		stackbuff = true,
+		cost = true,
+		price = true,
+		value = true,
+		count = true,
+	}
+
+	local function addIdsFromInfo(bucket, value, depth)
+		depth = depth or 0
+		if depth > 3 or value == nil then
 			return
 		end
-		for _, field in ipairs({ "Icon", "IconImage", "Texture", "DecalID", "Picture" }) do
-			local val = info[field]
-			if val ~= nil then
-				local id = string.match(tostring(val), "%d+")
-				if id and #id >= 6 then
-					bucket[id] = true
+		if type(value) == "string" then
+			local id = string.match(value, "%d+")
+			if id and #id >= 7 then
+				bucket[id] = true
+			end
+		elseif type(value) == "number" then
+			if value >= 1000000 then
+				bucket[tostring(math.floor(value))] = true
+			end
+		elseif type(value) == "table" then
+			for k, v in pairs(value) do
+				if not (type(k) == "string" and NON_ASSET_KEYS[string.lower(k)]) then
+					addIdsFromInfo(bucket, v, depth + 1)
 				end
 			end
 		end
+	end
+
+	local function isWavyPurpleEntry(key, info)
+		local combined = string.lower(tostring(key or ""))
+		if type(info) == "table" then
+			if info.DisplayName ~= nil then
+				combined = combined .. " " .. string.lower(tostring(info.DisplayName))
+			end
+			if info.Name ~= nil then
+				combined = combined .. " " .. string.lower(tostring(info.Name))
+			end
+		end
+		return string.find(combined, "wavy", 1, true) ~= nil and string.find(combined, "purple", 1, true) ~= nil
 	end
 
 	if gameApi.EggTypes then
@@ -2055,21 +2213,36 @@ do
 				local normKey = string.lower(tostring(key))
 				local disp = type(info) == "table" and info.DisplayName and string.lower(tostring(info.DisplayName)) or ""
 				if normKey == "softwax" or disp == "soft wax" then
-					addIconFromInfo(tokenIds.softWax, info)
+					addIdsFromInfo(tokenIds.softWax, info)
 				elseif normKey == "bitterberry" or disp == "bitterberry" then
-					addIconFromInfo(tokenIds.bitterberry, info)
+					addIdsFromInfo(tokenIds.bitterberry, info)
 				elseif normKey == "honey" or disp == "honey" then
-					addIconFromInfo(tokenIds.honey, info)
+					addIdsFromInfo(tokenIds.honey, info)
 				elseif normKey == "treat" or disp == "treat" then
-					addIconFromInfo(tokenIds.treat, info)
+					addIdsFromInfo(tokenIds.treat, info)
 				elseif normKey == "royaljelly" or disp == "royal jelly" then
-					addIconFromInfo(tokenIds.royalJelly, info)
+					addIdsFromInfo(tokenIds.royalJelly, info)
 				elseif normKey == "swirledwax" or disp == "swirled wax" then
-					addIconFromInfo(tokenIds.swirledWax, info)
+					addIdsFromInfo(tokenIds.swirledWax, info)
 				elseif normKey == "causticwax" or disp == "caustic wax" then
-					addIconFromInfo(tokenIds.causticWax, info)
+					addIdsFromInfo(tokenIds.causticWax, info)
 				elseif normKey == "turpentine" or disp == "turpentine" then
-					addIconFromInfo(tokenIds.turpentine, info)
+					addIdsFromInfo(tokenIds.turpentine, info)
+				elseif isWavyPurpleEntry(key, info) then
+					addIdsFromInfo(tokenIds.wavyPurpleHive, info)
+				end
+			end
+		end
+	end
+
+	if gameApi.StickerTypes then
+		local ok, sTypes = pcall(function()
+			return secureCall(gameApi.StickerTypes)
+		end)
+		if ok and type(sTypes) == "table" then
+			for key, info in pairs(sTypes) do
+				if isWavyPurpleEntry(key, info) then
+					addIdsFromInfo(tokenIds.wavyPurpleHive, info)
 				end
 			end
 		end
@@ -2078,7 +2251,7 @@ end
 
 local tokenHighlighter
 
-local tokenHider = {
+tokenHider = {
 	ids = tokenIds,
 	saved = {},
 	watchers = {},
@@ -2114,7 +2287,22 @@ local function extractTokenIconId(token)
 	return nil
 end
 
+function tokenHider:AnyHideEnabled()
+	return cfg.perf.onlyHighlightedTokens == true
+		or cfg.tokens.hideHoney == true
+		or cfg.tokens.hideSoftWax == true
+		or cfg.tokens.hideBitterberry == true
+		or cfg.tokens.hideTreat == true
+		or cfg.tokens.hideRoyalJelly == true
+end
+
 function tokenHider:ShouldHide(token)
+	if cfg.perf.onlyHighlightedTokens then
+		if tokenHighlighter and tokenHighlighter:GetHighlightStyle(token) ~= nil then
+			return false
+		end
+		return true
+	end
 	local iconId = extractTokenIconId(token)
 	if not iconId then
 		return false
@@ -2224,7 +2412,7 @@ function tokenHider:Evaluate(token)
 	end
 end
 
-function tokenHider:Unwatch(token)
+function tokenHider:DisconnectWatchers(token)
 	local conns = self.watchers[token]
 	if conns then
 		self.watchers[token] = nil
@@ -2234,7 +2422,12 @@ function tokenHider:Unwatch(token)
 			end)
 		end
 	end
+end
+
+function tokenHider:Unwatch(token)
+	self:DisconnectWatchers(token)
 	self.saved[token] = nil
+	self.descCache[token] = nil
 end
 
 function tokenHider:Watch(token)
@@ -2244,14 +2437,19 @@ function tokenHider:Watch(token)
 	local conns = {}
 	self.watchers[token] = conns
 
+	local function onIconUpdated()
+		self:Evaluate(token)
+		if tokenHighlighter then
+			tokenHighlighter:Evaluate(token)
+		end
+		if extractTokenIconId(token) ~= nil then
+			self:DisconnectWatchers(token)
+		end
+	end
+
 	local function bindDecal(obj)
 		if (obj:IsA("Decal") or obj:IsA("Texture")) and obj.GetPropertyChangedSignal then
-			table.insert(conns, obj:GetPropertyChangedSignal("Texture"):Connect(function()
-				self:Evaluate(token)
-				if tokenHighlighter then
-					tokenHighlighter:Evaluate(token)
-				end
-			end))
+			table.insert(conns, obj:GetPropertyChangedSignal("Texture"):Connect(onIconUpdated))
 		end
 	end
 
@@ -2262,10 +2460,7 @@ function tokenHider:Watch(token)
 	if token.DescendantAdded then
 		table.insert(conns, token.DescendantAdded:Connect(function(desc)
 			bindDecal(desc)
-			self:Evaluate(token)
-			if tokenHighlighter then
-				tokenHighlighter:Evaluate(token)
-			end
+			onIconUpdated()
 		end))
 	end
 
@@ -2281,7 +2476,9 @@ function tokenHider:RefreshAll()
 		return
 	end
 	for _, token in ipairs(folder:GetChildren()) do
-		self:Watch(token)
+		if extractTokenIconId(token) == nil then
+			self:Watch(token)
+		end
 		self:Evaluate(token)
 	end
 end
@@ -2364,7 +2561,46 @@ local HIGHLIGHT_STYLES = {
 		beamHeight = 20,
 		beamWidth = 0.28,
 	},
+	wavyPurpleHive = {
+		key = "wavyPurpleHive",
+		label = "WAVY PURPLE HIVE",
+		notifyTitle = "Wavy Purple Hive Skin!",
+		color = Color3.fromRGB(190, 95, 255),
+		outline = Color3.fromRGB(238, 210, 255),
+		beamHeight = 26,
+		beamWidth = 0.34,
+	},
+	sticker = {
+		key = "sticker",
+		label = "STICKER",
+		notifyTitle = "Sticker Token!",
+		color = Color3.fromRGB(95, 225, 255),
+		outline = Color3.fromRGB(220, 250, 255),
+		beamHeight = 22,
+		beamWidth = 0.28,
+	},
 }
+
+matchHighlightStyleById = function(iconId, isStickerToken)
+	if cfg.highlights.turpentine and iconId and tokenIds.turpentine[iconId] then
+		return HIGHLIGHT_STYLES.turpentine
+	end
+	if cfg.highlights.wavyPurpleHive then
+		if (iconId and tokenIds.wavyPurpleHive[iconId]) or (next(tokenIds.wavyPurpleHive) == nil and isStickerToken == true) then
+			return HIGHLIGHT_STYLES.wavyPurpleHive
+		end
+	end
+	if cfg.highlights.causticWax and iconId and tokenIds.causticWax[iconId] then
+		return HIGHLIGHT_STYLES.causticWax
+	end
+	if cfg.highlights.swirledWax and iconId and tokenIds.swirledWax[iconId] then
+		return HIGHLIGHT_STYLES.swirledWax
+	end
+	if cfg.highlights.allStickers and isStickerToken == true then
+		return HIGHLIGHT_STYLES.sticker
+	end
+	return nil
+end
 
 local function makeVerticalCylinderCFrame(x, y, z)
 	if CFrame.Angles then
@@ -2426,20 +2662,12 @@ function tokenHighlighter:GetRootFolder()
 end
 
 function tokenHighlighter:GetHighlightStyle(token)
-	local iconId = extractTokenIconId(token)
-	if not iconId then
+	if not token then
 		return nil
 	end
-	if cfg.highlights.turpentine and self.ids.turpentine[iconId] then
-		return HIGHLIGHT_STYLES.turpentine
-	end
-	if cfg.highlights.causticWax and self.ids.causticWax[iconId] then
-		return HIGHLIGHT_STYLES.causticWax
-	end
-	if cfg.highlights.swirledWax and self.ids.swirledWax[iconId] then
-		return HIGHLIGHT_STYLES.swirledWax
-	end
-	return nil
+	local iconId = extractTokenIconId(token)
+	local isSticker = token:FindFirstChild("Spots") ~= nil
+	return matchHighlightStyleById(iconId, isSticker)
 end
 
 function tokenHighlighter:SyncFollowConnection()
@@ -2872,6 +3100,7 @@ local puffVisuals = {
 	appliedFadeGui = {},
 	appliedHideParticles = {},
 	appliedKeepSpores = {},
+	appliedHideModels = {},
 	descCache = {},
 }
 
@@ -2959,6 +3188,7 @@ function puffVisuals:Restore(puff)
 	self.appliedFadeGui[puff] = nil
 	self.appliedHideParticles[puff] = nil
 	self.appliedKeepSpores[puff] = nil
+	self.appliedHideModels[puff] = nil
 	self.descCache[puff] = nil
 	if not record then
 		return
@@ -2982,15 +3212,17 @@ function puffVisuals:Apply(puff, rarity)
 		self.appliedFadeGui[puff] = nil
 		self.appliedHideParticles[puff] = nil
 		self.appliedKeepSpores[puff] = nil
+		self.appliedHideModels[puff] = nil
 		self.descCache[puff] = nil
 		return
 	end
-	local alpha = getTargetTransparency(rarity)
-	local fadeGui = alpha > 0 and cfg.puffshrooms.fadeGui == true
-	local hideParticles = cfg.perf.filterParticles == true
-	local keepSpores = cfg.perf.keepSporeTrails == true
+	local hideModel = (cfg.perf.hidePuffModels == true) and (rarity ~= "Mythic")
+	local alpha = hideModel and 1 or getTargetTransparency(rarity)
+	local fadeGui = hideModel or (alpha > 0 and cfg.puffshrooms.fadeGui == true)
+	local hideParticles = hideModel or (cfg.perf.filterParticles == true)
+	local keepSpores = (not hideModel) and (cfg.perf.keepSporeTrails == true)
 
-	if alpha <= 0 and not hideParticles then
+	if alpha <= 0 and not hideParticles and not hideModel then
 		self:Restore(puff)
 		return
 	end
@@ -2998,7 +3230,8 @@ function puffVisuals:Apply(puff, rarity)
 	if self.appliedAlpha[puff] == alpha
 		and self.appliedFadeGui[puff] == fadeGui
 		and self.appliedHideParticles[puff] == hideParticles
-		and self.appliedKeepSpores[puff] == keepSpores then
+		and self.appliedKeepSpores[puff] == keepSpores
+		and self.appliedHideModels[puff] == hideModel then
 		return
 	end
 
@@ -3014,16 +3247,36 @@ function puffVisuals:Apply(puff, rarity)
 	self.appliedFadeGui[puff] = fadeGui
 	self.appliedHideParticles[puff] = hideParticles
 	self.appliedKeepSpores[puff] = keepSpores
+	self.appliedHideModels[puff] = hideModel
 
 	local cache = self:GetDescCache(puff)
 
 	for _, inst in ipairs(cache.parts) do
-		local origMod = record[inst] and record[inst].LocalTransparencyModifier
+		local propRec = record[inst]
+		local origMod = propRec and propRec.LocalTransparencyModifier
 		if origMod == nil then
 			local ok, val = pcall(function() return inst.LocalTransparencyModifier end)
 			origMod = ok and val or 0
-			record[inst] = record[inst] or {}
-			record[inst].LocalTransparencyModifier = origMod
+			propRec = propRec or {}
+			record[inst] = propRec
+			propRec.LocalTransparencyModifier = origMod
+		end
+		if alpha >= 1 then
+			if propRec.CastShadow == nil then
+				local okS, valS = pcall(function() return inst.CastShadow end)
+				if okS then
+					propRec.CastShadow = valS
+				end
+			end
+			pcall(function()
+				inst.CastShadow = false
+			end)
+		elseif propRec.CastShadow ~= nil then
+			local restoreShadow = propRec.CastShadow
+			propRec.CastShadow = nil
+			pcall(function()
+				inst.CastShadow = restoreShadow
+			end)
 		end
 		pcall(function()
 			inst.LocalTransparencyModifier = math.clamp(origMod + alpha * (1 - origMod), 0, 1)
@@ -4268,11 +4521,16 @@ local highlightFolder = assistantTab.AddFolder("Highlight Tokens (3D)")
 
 local function onHighlightToggleChanged()
 	tokenHighlighter:RefreshAll()
+	if cfg.perf.onlyHighlightedTokens then
+		tokenHider:RefreshAll()
+	end
 end
 
 controls.highlightTurpentine = highlightFolder.AddSwitch("Highlight Turpentine (Red)", onHighlightToggleChanged, "highlights", "turpentine")
 controls.highlightCausticWax = highlightFolder.AddSwitch("Highlight Caustic Wax (Green)", onHighlightToggleChanged, "highlights", "causticWax")
 controls.highlightSwirledWax = highlightFolder.AddSwitch("Highlight Swirled Wax (Yellow)", onHighlightToggleChanged, "highlights", "swirledWax")
+controls.highlightWavyPurpleHive = highlightFolder.AddSwitch("Highlight Wavy Purple Hive (Purple)", onHighlightToggleChanged, "highlights", "wavyPurpleHive")
+controls.highlightAllStickers = highlightFolder.AddSwitch("Highlight Other Stickers", onHighlightToggleChanged, "highlights", "allStickers")
 controls.highlightBeam = highlightFolder.AddSwitch("3D Beacon Beam", onHighlightToggleChanged, "highlights", "beam")
 controls.highlightLabel = highlightFolder.AddSwitch("Floating Token Label", onHighlightToggleChanged, "highlights", "label")
 controls.highlightNotify = highlightFolder.AddSwitch("Notify On Rare Token", nil, "highlights", "notify")
@@ -4288,6 +4546,32 @@ local function onPuffVisualsChanged()
 end
 
 local worldFolder = assistantTab.AddFolder("World / Performance")
+
+controls.ultraFps = worldFolder.AddSwitch("Ultra FPS Mode (Puff Party)", function(enabled)
+	if enabled then
+		controls.hideDecorations.Set(true)
+		controls.lowGraphics.Set(true)
+		controls.hideBees.Set(true)
+		controls.keepSporeTrails.Set(false)
+		controls.filterParticles.Set(true)
+		controls.hidePlayers.Set(true)
+		controls.hideFlowers.Set(true)
+		controls.hideBalloons.Set(true)
+		controls.onlyHighlightedTokens.Set(true)
+		controls.hidePuffModels.Set(true)
+	else
+		controls.hideDecorations.Set(false)
+		controls.lowGraphics.Set(false)
+		controls.hideBees.Set(false)
+		controls.filterParticles.Set(false)
+		controls.keepSporeTrails.Set(true)
+		controls.hidePlayers.Set(false)
+		controls.hideFlowers.Set(false)
+		controls.hideBalloons.Set(false)
+		controls.onlyHighlightedTokens.Set(false)
+		controls.hidePuffModels.Set(false)
+	end
+end, "perf", "ultraFps")
 
 controls.hideDecorations = worldFolder.AddSwitch("Hide Decorations", function(enabled)
 	decorationsController:SetEnabled(enabled)
@@ -4322,6 +4606,14 @@ end, "perf", "hideFlowers")
 controls.hideBalloons = worldFolder.AddSwitch("Hide Field Balloons", function(enabled)
 	fpsOptimizer:SetHideBalloons(enabled)
 end, "perf", "hideBalloons")
+
+controls.onlyHighlightedTokens = worldFolder.AddSwitch("Only Show Highlighted Tokens", function(enabled)
+	fpsOptimizer:SetOnlyHighlightedTokens(enabled)
+end, "perf", "onlyHighlightedTokens")
+
+controls.hidePuffModels = worldFolder.AddSwitch("Hide Non-Mythic Puffshrooms", function()
+	onPuffVisualsChanged()
+end, "perf", "hidePuffModels")
 
 worldFolder.Toggle(true, true)
 
@@ -4393,9 +4685,12 @@ settingsFolder.AddButton("Reset All Settings", function()
 	controls.highlightTurpentine.Set(cfg.highlights.turpentine)
 	controls.highlightCausticWax.Set(cfg.highlights.causticWax)
 	controls.highlightSwirledWax.Set(cfg.highlights.swirledWax)
+	controls.highlightWavyPurpleHive.Set(cfg.highlights.wavyPurpleHive)
+	controls.highlightAllStickers.Set(cfg.highlights.allStickers)
 	controls.highlightBeam.Set(cfg.highlights.beam)
 	controls.highlightLabel.Set(cfg.highlights.label)
 	controls.highlightNotify.Set(cfg.highlights.notify)
+	controls.ultraFps.Set(false, true)
 	controls.hideDecorations.Set(cfg.decorations.hide)
 	controls.lowGraphics.Set(cfg.perf.lowGraphics)
 	controls.hideBees.Set(cfg.perf.hideBees)
@@ -4404,6 +4699,8 @@ settingsFolder.AddButton("Reset All Settings", function()
 	controls.hidePlayers.Set(cfg.perf.hidePlayers)
 	controls.hideFlowers.Set(cfg.perf.hideFlowers)
 	controls.hideBalloons.Set(cfg.perf.hideBalloons)
+	controls.onlyHighlightedTokens.Set(cfg.perf.onlyHighlightedTokens)
+	controls.hidePuffModels.Set(cfg.perf.hidePuffModels)
 	controls.flamesEnabled.Set(cfg.flames.enabled)
 	controls.flamesShiftLockCompat.Set(cfg.flames.shiftLockCompat)
 	controls.flamesRefreshPriority.Set(cfg.flames.refreshPriority)
@@ -4434,6 +4731,26 @@ end, 145)
 settingsFolder.Toggle(true, true)
 
 -- Runtime Watchers & Monitor Step
+local monitorDirty = false
+
+local function scheduleMonitorStep()
+	if monitorDirty then
+		return
+	end
+	monitorDirty = true
+	local runFn = function()
+		monitorDirty = false
+		if stepMonitor and not threads.closed then
+			stepMonitor(true)
+		end
+	end
+	if task and task.defer then
+		task.defer(runFn)
+	else
+		runFn()
+	end
+end
+
 local function bindCollectiblesFolder(folder)
 	connections:Cancel("collectiblesAdded")
 	connections:Cancel("collectiblesRemoved")
@@ -4441,9 +4758,13 @@ local function bindCollectiblesFolder(folder)
 		return
 	end
 	connections:Add("collectiblesAdded", folder.ChildAdded:Connect(function(token)
-		tokenHider:Watch(token)
-		tokenHider:Evaluate(token)
+		if extractTokenIconId(token) == nil then
+			tokenHider:Watch(token)
+		end
 		tokenHighlighter:Evaluate(token)
+		if tokenHider:AnyHideEnabled() then
+			tokenHider:Evaluate(token)
+		end
 	end))
 	connections:Add("collectiblesRemoved", folder.ChildRemoved:Connect(function(token)
 		tokenHider:Unwatch(token)
@@ -4451,9 +4772,13 @@ local function bindCollectiblesFolder(folder)
 		tokenHighlighter.notified[token] = nil
 	end))
 	for _, token in ipairs(folder:GetChildren()) do
-		tokenHider:Watch(token)
-		tokenHider:Evaluate(token)
+		if extractTokenIconId(token) == nil then
+			tokenHider:Watch(token)
+		end
 		tokenHighlighter:Evaluate(token)
+		if tokenHider:AnyHideEnabled() then
+			tokenHider:Evaluate(token)
+		end
 	end
 end
 
@@ -4466,18 +4791,14 @@ local function bindPuffFolder(folder)
 	if not folder then
 		return
 	end
-	connections:Add("puffAdded", folder.ChildAdded:Connect(function(puff)
-		if stepMonitor then
-			stepMonitor(true)
-		end
+	connections:Add("puffAdded", folder.ChildAdded:Connect(function()
+		scheduleMonitorStep()
 	end))
 	connections:Add("puffRemoved", folder.ChildRemoved:Connect(function(puff)
 		puffVisuals:Restore(puff)
 		puffMetaCache[puff] = nil
 		monitorState.notified[puff] = nil
-		if stepMonitor then
-			stepMonitor(true)
-		end
+		scheduleMonitorStep()
 	end))
 end
 
@@ -4487,9 +4808,7 @@ if happenings then
 	connections:Add("happeningsAdded", happenings.ChildAdded:Connect(function(child)
 		if child.Name == "Puffshrooms" then
 			bindPuffFolder(child)
-			if stepMonitor then
-				stepMonitor(true)
-			end
+			scheduleMonitorStep()
 		end
 	end))
 end
@@ -4528,9 +4847,7 @@ connections:Add("workspaceChildren", workspace.ChildAdded:Connect(function(child
 		connections:Add("happeningsAdded", child.ChildAdded:Connect(function(sub)
 			if sub.Name == "Puffshrooms" then
 				bindPuffFolder(sub)
-				if stepMonitor then
-					stepMonitor(true)
-				end
+				scheduleMonitorStep()
 			end
 		end))
 	end
@@ -4577,6 +4894,7 @@ stepMonitor = function(skipMaintain)
 			puffVisuals.appliedFadeGui[puff] = nil
 			puffVisuals.appliedHideParticles[puff] = nil
 			puffVisuals.appliedKeepSpores[puff] = nil
+			puffVisuals.appliedHideModels[puff] = nil
 			puffVisuals.descCache[puff] = nil
 		end
 	end
