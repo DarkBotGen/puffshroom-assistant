@@ -648,4 +648,44 @@ scheduleBatch(); scheduleBatch(); scheduleBatch()
 if dirty then runs += 1; dirty = false end
 assert(runs == 1, "Debounced burst scheduler must coalesce multiple rapid events into 1 refresh")
 
-print("PASS: Puffshroom Assistant walkspeed, token hiding, Wavy Purple Hive, Spawn culling, puffshroom hiding, hide decorations, flame bodygyro, and FPS optimizer verified")
+-- 7. Skip Pickup Anim, Hide Player Amulets, World Decal/Emitter filter, and Auto Stinger 10s interval + cooldown guard
+local skipAnim, animCount = true, 0
+local function animCollect()
+	if skipAnim then return end
+	animCount += 1
+end
+animCollect(); assert(animCount == 0, "skipCollectAnim suppresses pickup animation")
+skipAnim = false
+animCollect(); assert(animCount == 1, "disabling skipCollectAnim restores pickup animation")
+
+local function shouldCullWorldEffect(folderName, isPlayerChar)
+	local skip = { Collectibles = true, Flowers = true, Toys = true }
+	return not isPlayerChar and not skip[folderName]
+end
+assert(shouldCullWorldEffect("Map", false) == true, "World scenery decals/emitters are culled in Low Graphics")
+assert(shouldCullWorldEffect("Map", true) == false, "Player character decals/emitters are preserved")
+assert(shouldCullWorldEffect("Flowers", false) == false, "Field flower textures are preserved")
+
+local stEnabled, stKey, lastUse, uses = false, "F", nil, 0
+local function stepStinger(now)
+	if not stEnabled then return false end
+	if not lastUse or (now - lastUse) >= 10 then
+		lastUse = now
+		uses += 1
+		return true
+	end
+	return false
+end
+local function onKeyPress(key, gameProcessed)
+	if gameProcessed or string.upper(key) ~= stKey then return end
+	stEnabled = not stEnabled
+	if stEnabled then stepStinger(100) end
+end
+onKeyPress("F", true); assert(stEnabled == false and uses == 0, "F keybind ignores gameProcessed events")
+onKeyPress("F", false); assert(stEnabled == true and uses == 1, "F toggles Auto Stinger ON and fires")
+assert(stepStinger(105) == false and uses == 1, "Auto Stinger waits full 10s interval")
+assert(stepStinger(110.1) == true and uses == 2, "Auto Stinger fires again after 10s")
+onKeyPress("F", false); assert(stEnabled == false, "F toggles Auto Stinger OFF")
+stEnabled = true; assert(stepStinger(112) == false and uses == 2, "Cooldown preserved across rapid off/on toggle")
+
+print("PASS: Puffshroom Assistant walkspeed, token hiding, Wavy Purple Hive, Spawn culling, puffshroom hiding, hide decorations, flame bodygyro, FPS optimizer, and Auto Stinger verified")

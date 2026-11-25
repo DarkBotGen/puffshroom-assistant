@@ -39,6 +39,10 @@ local HttpService = getService("HttpService")
 local StarterGui = getService("StarterGui")
 local TextService = getService("TextService")
 local Lighting = getService("Lighting")
+local okVim, VirtualInputManager = pcall(getService, "VirtualInputManager")
+if not okVim then
+	VirtualInputManager = nil
+end
 
 if not isTestHarness and game.PlaceId ~= 1537690962 then
 	pcall(function()
@@ -120,6 +124,14 @@ local defaultCfg = {
 		hideBalloons = false,
 		onlyHighlightedTokens = false,
 		hidePuffModels = false,
+		skipCollectAnim = false,
+		hideAmulets = false,
+	},
+	stinger = {
+		enabled = false,
+		interval = 10,
+		slot = 5,
+		keybind = "F",
 	},
 	flames = {
 		enabled = false,
@@ -315,8 +327,16 @@ do
 	local collectorsAnimMod = ReplicatedStorage:FindFirstChild("CollectiblesAnimator")
 	if collectorsAnimMod then
 		local ok, mod = pcall(require, collectorsAnimMod)
-		if ok and type(mod) == "table" and type(mod.Spawn) == "function" then
+		if ok and type(mod) == "table" and (type(mod.Spawn) == "function" or type(mod.AnimateCollect) == "function") then
 			gameApi.CollectiblesAnimator = mod
+		end
+	end
+
+	local localAmuletsMod = ReplicatedStorage:FindFirstChild("LocalAmulets")
+	if localAmuletsMod then
+		local ok, mod = pcall(require, localAmuletsMod)
+		if ok and type(mod) == "table" and type(mod.CreatePlayerAmulets) == "function" then
+			gameApi.LocalAmulets = mod
 		end
 	end
 
@@ -341,6 +361,10 @@ do
 	local playerSettingsEv = eventsFolder and eventsFolder:FindFirstChild("PlayerSettingsEvent")
 	if playerSettingsEv and playerSettingsEv.FireServer then
 		gameApi.PlayerSettingsEvent = playerSettingsEv
+	end
+	local playerActivesCmd = eventsFolder and eventsFolder:FindFirstChild("PlayerActivesCommand")
+	if playerActivesCmd then
+		gameApi.PlayerActivesCommand = playerActivesCmd
 	end
 end
 
@@ -773,6 +797,35 @@ local function isProtectedHighlightPart(inst)
 	return n == "TokenBeacon" or n == "SmileyDropBeam" or n == "SmileyBeacon"
 end
 
+local LOW_GFX_DECAL_SKIP_FOLDERS = {
+	Collectibles = true,
+	PlayerFlames = true,
+	Particles = true,
+	Happenings = true,
+	PuffAssistantTokenHighlights = true,
+	RbcHelperSmileyHighlights = true,
+	FlowerZones = true,
+	Flowers = true,
+	Bees = true,
+	Honeycombs = true,
+	HivePlatforms = true,
+	Toys = true,
+	Stations = true,
+}
+
+local function isAnyPlayerCharacter(inst)
+	if not inst or not Players or not Players.GetPlayers then
+		return false
+	end
+	for _, player in ipairs(Players:GetPlayers()) do
+		local char = player.Character
+		if char and isDescendantOf(inst, char) then
+			return true
+		end
+	end
+	return false
+end
+
 local fpsOptimizer = {
 	savedLighting = nil,
 	savedLightingIBL = nil,
@@ -784,6 +837,8 @@ local fpsOptimizer = {
 	savedPollenPopUpSetting = nil,
 	pollenPopUpChanged = false,
 	savedPartVisuals = {},
+	savedWorldDecals = {},
+	savedWorldEmitters = {},
 	lowGfxActive = false,
 
 	detachedBees = {},
@@ -799,6 +854,16 @@ local fpsOptimizer = {
 	installedSpawnWrapper = nil,
 	origTokenSpawn = nil,
 
+	skipCollectAnimActive = false,
+	installedCollectAnimWrapper = nil,
+	origCollectAnim = nil,
+
+	hideAmuletsActive = false,
+	savedAmulets = {},
+	amuletCharWatched = {},
+	installedAmuletsWrapper = nil,
+	origCreateAmulets = nil,
+
 	savedPlayers = {},
 	playerCharWatched = {},
 	hidePlayersActive = false,
@@ -809,6 +874,45 @@ local fpsOptimizer = {
 	detachedBalloons = nil,
 	hideBalloonsActive = false,
 }
+
+function fpsOptimizer:ApplyLowGraphicsEffect(desc)
+	if not self.lowGfxActive or not desc or not desc.Parent or isProtectedHighlightPart(desc) or isAnyPlayerCharacter(desc) then
+		return
+	end
+	if desc:IsA("Decal") or desc:IsA("Texture") then
+		if self.savedWorldDecals[desc] ~= nil then
+			return
+		end
+		local okTex, tex = pcall(function()
+			return desc.Texture
+		end)
+		if okTex and tostring(tex) == "rbxassetid://3581259086" then
+			return
+		end
+		local okT, origT = pcall(function()
+			return desc.Transparency
+		end)
+		if okT and type(origT) == "number" then
+			self.savedWorldDecals[desc] = origT
+			pcall(function()
+				desc.Transparency = 1
+			end)
+		end
+	elseif desc:IsA("ParticleEmitter") then
+		if self.savedWorldEmitters[desc] ~= nil or desc.Name == "PuffshroomSpores" then
+			return
+		end
+		local okE, origEn = pcall(function()
+			return desc.Enabled
+		end)
+		if okE then
+			self.savedWorldEmitters[desc] = origEn
+			pcall(function()
+				desc.Enabled = false
+			end)
+		end
+	end
+end
 
 function fpsOptimizer:ApplyLowGraphicsPart(desc)
 	if not self.lowGfxActive or not desc or not desc.Parent or self.savedPartVisuals[desc] then
@@ -859,6 +963,24 @@ function fpsOptimizer:RestoreLowGraphics()
 		end
 	end
 	table.clear(self.savedPartVisuals)
+
+	for inst, origT in pairs(self.savedWorldDecals) do
+		if inst and inst.Parent then
+			pcall(function()
+				inst.Transparency = origT
+			end)
+		end
+	end
+	table.clear(self.savedWorldDecals)
+
+	for inst, origEn in pairs(self.savedWorldEmitters) do
+		if inst and inst.Parent then
+			pcall(function()
+				inst.Enabled = origEn
+			end)
+		end
+	end
+	table.clear(self.savedWorldEmitters)
 
 	if self.savedLighting and Lighting then
 		local l = self.savedLighting
@@ -1118,13 +1240,17 @@ function fpsOptimizer:SetLowGraphics(enabled)
 	for _, topChild in ipairs(workspace:GetChildren()) do
 		local n = topChild.Name
 		if n ~= "Collectibles" and n ~= "PlayerFlames" and n ~= "Particles" and n ~= "Happenings" and n ~= "PuffAssistantTokenHighlights" and n ~= "RbcHelperSmileyHighlights" then
+			local doEffects = not LOW_GFX_DECAL_SKIP_FOLDERS[n] and not isAnyPlayerCharacter(topChild)
 			if topChild:IsA("BasePart") then
 				self:ApplyLowGraphicsPart(topChild)
-			else
-				for _, desc in ipairs(topChild:GetDescendants()) do
-					if desc:IsA("BasePart") then
-						self:ApplyLowGraphicsPart(desc)
-					end
+			elseif doEffects then
+				self:ApplyLowGraphicsEffect(topChild)
+			end
+			for _, desc in ipairs(topChild:GetDescendants()) do
+				if desc:IsA("BasePart") then
+					self:ApplyLowGraphicsPart(desc)
+				elseif doEffects then
+					self:ApplyLowGraphicsEffect(desc)
 				end
 			end
 		end
@@ -1417,6 +1543,316 @@ function fpsOptimizer:SetOnlyHighlightedTokens(enabled)
 	end
 end
 
+function fpsOptimizer:EnsureCollectAnimHook()
+	if not gameApi.CollectiblesAnimator or type(gameApi.CollectiblesAnimator.AnimateCollect) ~= "function" then
+		return
+	end
+	if _G.__puffAssistantCollectAnimHooked then
+		return
+	end
+	if type(hookfunction) == "function" then
+		local okHook = pcall(function()
+			local origFn
+			local hookFn = function(...)
+				if _G.__puffAssistantSkipCollectAnim then
+					return nil
+				end
+				return origFn(...)
+			end
+			if newcclosure then
+				hookFn = newcclosure(hookFn)
+			end
+			origFn = hookfunction(gameApi.CollectiblesAnimator.AnimateCollect, hookFn)
+		end)
+		if okHook then
+			_G.__puffAssistantCollectAnimHooked = true
+			_G.__puffAssistantCollectAnimHookMethod = "hookfunction"
+			self.installedCollectAnimWrapper = true
+			return
+		end
+	end
+	if not _G.__puffAssistantCollectAnimOrig then
+		_G.__puffAssistantCollectAnimOrig = gameApi.CollectiblesAnimator.AnimateCollect
+	end
+	local origFn = _G.__puffAssistantCollectAnimOrig
+	local wrapper = function(...)
+		if _G.__puffAssistantSkipCollectAnim then
+			return nil
+		end
+		return origFn(...)
+	end
+	_G.__puffAssistantCollectAnimHooked = wrapper
+	_G.__puffAssistantCollectAnimHookMethod = "table"
+	gameApi.CollectiblesAnimator.AnimateCollect = wrapper
+	self.installedCollectAnimWrapper = wrapper
+	self.origCollectAnim = origFn
+end
+
+function fpsOptimizer:UnhookCollectAnim()
+	self.skipCollectAnimActive = false
+	_G.__puffAssistantSkipCollectAnim = nil
+	if _G.__puffAssistantCollectAnimHookMethod == "table" then
+		if gameApi.CollectiblesAnimator and _G.__puffAssistantCollectAnimOrig and gameApi.CollectiblesAnimator.AnimateCollect == _G.__puffAssistantCollectAnimHooked then
+			gameApi.CollectiblesAnimator.AnimateCollect = _G.__puffAssistantCollectAnimOrig
+		end
+		_G.__puffAssistantCollectAnimHooked = nil
+		_G.__puffAssistantCollectAnimOrig = nil
+		_G.__puffAssistantCollectAnimHookMethod = nil
+	end
+	self.installedCollectAnimWrapper = nil
+	self.origCollectAnim = nil
+end
+
+function fpsOptimizer:SetSkipCollectAnim(enabled)
+	self.skipCollectAnimActive = enabled == true
+	if enabled then
+		self:EnsureCollectAnimHook()
+		_G.__puffAssistantSkipCollectAnim = true
+	else
+		_G.__puffAssistantSkipCollectAnim = nil
+	end
+end
+
+function fpsOptimizer:EnsureLocalAmuletsHook()
+	if not gameApi.LocalAmulets or type(gameApi.LocalAmulets.CreatePlayerAmulets) ~= "function" then
+		return
+	end
+	if _G.__puffAssistantLocalAmuletsHooked then
+		return
+	end
+	if type(hookfunction) == "function" then
+		local okHook = pcall(function()
+			local origFn
+			local hookFn = function(...)
+				if _G.__puffAssistantHideAmulets then
+					return nil
+				end
+				return origFn(...)
+			end
+			if newcclosure then
+				hookFn = newcclosure(hookFn)
+			end
+			origFn = hookfunction(gameApi.LocalAmulets.CreatePlayerAmulets, hookFn)
+		end)
+		if okHook then
+			_G.__puffAssistantLocalAmuletsHooked = true
+			_G.__puffAssistantLocalAmuletsHookMethod = "hookfunction"
+			self.installedAmuletsWrapper = true
+			return
+		end
+	end
+	if not _G.__puffAssistantLocalAmuletsOrig then
+		_G.__puffAssistantLocalAmuletsOrig = gameApi.LocalAmulets.CreatePlayerAmulets
+	end
+	local origFn = _G.__puffAssistantLocalAmuletsOrig
+	local wrapper = function(...)
+		if _G.__puffAssistantHideAmulets then
+			return nil
+		end
+		return origFn(...)
+	end
+	_G.__puffAssistantLocalAmuletsHooked = wrapper
+	_G.__puffAssistantLocalAmuletsHookMethod = "table"
+	gameApi.LocalAmulets.CreatePlayerAmulets = wrapper
+	self.installedAmuletsWrapper = wrapper
+	self.origCreateAmulets = origFn
+end
+
+function fpsOptimizer:UnhookLocalAmulets()
+	_G.__puffAssistantHideAmulets = nil
+	if _G.__puffAssistantLocalAmuletsHookMethod == "table" then
+		if gameApi.LocalAmulets and _G.__puffAssistantLocalAmuletsOrig and gameApi.LocalAmulets.CreatePlayerAmulets == _G.__puffAssistantLocalAmuletsHooked then
+			gameApi.LocalAmulets.CreatePlayerAmulets = _G.__puffAssistantLocalAmuletsOrig
+		end
+		_G.__puffAssistantLocalAmuletsHooked = nil
+		_G.__puffAssistantLocalAmuletsOrig = nil
+		_G.__puffAssistantLocalAmuletsHookMethod = nil
+	end
+	self.installedAmuletsWrapper = nil
+	self.origCreateAmulets = nil
+end
+
+local function isAmuletObject(inst)
+	return inst and type(inst.Name) == "string" and string.find(string.lower(inst.Name), "amulet", 1, true) ~= nil
+end
+
+function fpsOptimizer:HideAmuletInstance(amuletObj)
+	if not self.hideAmuletsActive or not amuletObj or not amuletObj.Parent then
+		return
+	end
+	local record = self.savedAmulets[amuletObj]
+	if not record then
+		record = {}
+		self.savedAmulets[amuletObj] = record
+	end
+	local function hideVisual(inst)
+		if inst:IsA("BasePart") then
+			if not record[inst] then
+				local ok, origMod, origShadow = pcall(function()
+					return inst.LocalTransparencyModifier, inst.CastShadow
+				end)
+				if ok then
+					record[inst] = { LocalTransparencyModifier = origMod, CastShadow = origShadow }
+				end
+			end
+			pcall(function()
+				inst.LocalTransparencyModifier = 1
+				inst.CastShadow = false
+			end)
+		elseif inst:IsA("Decal") or inst:IsA("Texture") then
+			if not record[inst] then
+				local ok, origT = pcall(function()
+					return inst.Transparency
+				end)
+				if ok then
+					record[inst] = { Transparency = origT }
+				end
+			end
+			pcall(function()
+				inst.Transparency = 1
+			end)
+		elseif inst:IsA("ParticleEmitter") or inst:IsA("Trail") or inst:IsA("Beam") or inst:IsA("Light") or inst:IsA("BillboardGui") or inst:IsA("SurfaceGui") then
+			if not record[inst] then
+				local ok, origEn = pcall(function()
+					return inst.Enabled
+				end)
+				if ok then
+					record[inst] = { Enabled = origEn }
+				end
+			end
+			pcall(function()
+				inst.Enabled = false
+			end)
+		end
+	end
+	hideVisual(amuletObj)
+	for _, desc in ipairs(amuletObj:GetDescendants()) do
+		hideVisual(desc)
+	end
+end
+
+function fpsOptimizer:RestoreAmuletInstance(amuletObj)
+	local record = self.savedAmulets[amuletObj]
+	if not record then
+		return
+	end
+	self.savedAmulets[amuletObj] = nil
+	for inst, props in pairs(record) do
+		if inst and inst.Parent then
+			for prop, origVal in pairs(props) do
+				pcall(function()
+					inst[prop] = origVal
+				end)
+			end
+		end
+	end
+end
+
+function fpsOptimizer:HideCharacterAmulets(char)
+	if not self.hideAmuletsActive or not char or not char.Parent then
+		return
+	end
+	for _, child in ipairs(char:GetChildren()) do
+		if isAmuletObject(child) then
+			self:HideAmuletInstance(child)
+		end
+	end
+	local connKey = "fpsAmuletCharChild:" .. tostring(char)
+	if not connections:Get(connKey) and char.ChildAdded then
+		connections:Add(connKey, char.ChildAdded:Connect(function(child)
+			if self.hideAmuletsActive and isAmuletObject(child) then
+				self:HideAmuletInstance(child)
+			end
+		end))
+	end
+end
+
+function fpsOptimizer:RestoreCharacterAmulets(char)
+	connections:Cancel("fpsAmuletCharChild:" .. tostring(char))
+	if not char then
+		return
+	end
+	for amuletObj in pairs(self.savedAmulets) do
+		if amuletObj == char or amuletObj.Parent == char or not amuletObj.Parent then
+			self:RestoreAmuletInstance(amuletObj)
+		end
+	end
+end
+
+function fpsOptimizer:WatchPlayerAmulets(player)
+	if not player or self.amuletCharWatched[player] then
+		return
+	end
+	self.amuletCharWatched[player] = true
+	if player.Character then
+		self:HideCharacterAmulets(player.Character)
+	end
+	if player.CharacterAdded then
+		connections:Add("fpsAmuletCharAdded:" .. tostring(player), player.CharacterAdded:Connect(function(char)
+			if self.hideAmuletsActive then
+				self:HideCharacterAmulets(char)
+			end
+		end))
+	end
+	if player.CharacterRemoving then
+		connections:Add("fpsAmuletCharRem:" .. tostring(player), player.CharacterRemoving:Connect(function(char)
+			self:RestoreCharacterAmulets(char)
+		end))
+	end
+end
+
+function fpsOptimizer:RestoreAmulets()
+	self.hideAmuletsActive = false
+	_G.__puffAssistantHideAmulets = nil
+	connections:Cancel("fpsAmuletPlayerAdded")
+	connections:Cancel("fpsAmuletPlayerRemoving")
+	for player in pairs(self.amuletCharWatched) do
+		connections:Cancel("fpsAmuletCharAdded:" .. tostring(player))
+		connections:Cancel("fpsAmuletCharRem:" .. tostring(player))
+		if player.Character then
+			connections:Cancel("fpsAmuletCharChild:" .. tostring(player.Character))
+		end
+	end
+	table.clear(self.amuletCharWatched)
+	local toRestore = {}
+	for amuletObj in pairs(self.savedAmulets) do
+		table.insert(toRestore, amuletObj)
+	end
+	for _, amuletObj in ipairs(toRestore) do
+		self:RestoreAmuletInstance(amuletObj)
+	end
+end
+
+function fpsOptimizer:SetHideAmulets(enabled)
+	if not enabled then
+		self:RestoreAmulets()
+		return
+	end
+	self.hideAmuletsActive = true
+	self:EnsureLocalAmuletsHook()
+	_G.__puffAssistantHideAmulets = true
+	for _, player in ipairs(Players:GetPlayers()) do
+		self:WatchPlayerAmulets(player)
+	end
+	if not connections:Get("fpsAmuletPlayerAdded") and Players.PlayerAdded then
+		connections:Add("fpsAmuletPlayerAdded", Players.PlayerAdded:Connect(function(player)
+			if self.hideAmuletsActive then
+				self:WatchPlayerAmulets(player)
+			end
+		end))
+	end
+	if not connections:Get("fpsAmuletPlayerRemoving") and Players.PlayerRemoving then
+		connections:Add("fpsAmuletPlayerRemoving", Players.PlayerRemoving:Connect(function(player)
+			connections:Cancel("fpsAmuletCharAdded:" .. tostring(player))
+			connections:Cancel("fpsAmuletCharRem:" .. tostring(player))
+			self.amuletCharWatched[player] = nil
+			if player.Character then
+				self:RestoreCharacterAmulets(player.Character)
+			end
+		end))
+	end
+end
+
 function fpsOptimizer:SetFilterParticles(enabled)
 	if not enabled then
 		self:RestoreParticles()
@@ -1674,6 +2110,9 @@ function fpsOptimizer:RestoreAll()
 	self:RestoreParticles()
 	self:UnhookLocalFx()
 	self:UnhookTokenSpawn()
+	self:UnhookCollectAnim()
+	self:RestoreAmulets()
+	self:UnhookLocalAmulets()
 	self:RestorePlayers()
 	self:RestoreFlowers()
 	self:RestoreBalloons()
@@ -2125,6 +2564,136 @@ local function syncSmartAutoDig()
 			task.wait(0.1)
 		end
 	end)
+end
+
+-- Auto Stinger Controller (Default Keybind: F, 10s interval, Slot 5 fallback)
+local SLOT_KEYCODES = {}
+pcall(function()
+	SLOT_KEYCODES[1] = Enum.KeyCode.One
+	SLOT_KEYCODES[2] = Enum.KeyCode.Two
+	SLOT_KEYCODES[3] = Enum.KeyCode.Three
+	SLOT_KEYCODES[4] = Enum.KeyCode.Four
+	SLOT_KEYCODES[5] = Enum.KeyCode.Five
+	SLOT_KEYCODES[6] = Enum.KeyCode.Six
+	SLOT_KEYCODES[7] = Enum.KeyCode.Seven
+end)
+
+local stingerController = {
+	enabled = false,
+	lastUseClock = nil,
+	listeningForKey = false,
+	statusLabel = nil,
+	keybindBtn = nil,
+	lastStatusText = nil,
+	outOfStock = false,
+}
+
+function stingerController:GetStock()
+	local val = gameApi:Cache({ "Eggs", "Stinger" })
+	if type(val) == "number" then
+		return val
+	end
+	return nil
+end
+
+function stingerController:UpdateStatus(now)
+	if not self.statusLabel then
+		return
+	end
+	local key = tostring(cfg.stinger.keybind or "F")
+	local txt
+	if not self.enabled then
+		txt = "Status: OFF [" .. key .. "]"
+	elseif self.outOfStock then
+		txt = "Status: Out of Stingers [" .. key .. "]"
+	else
+		local interval = math.max(1, tonumber(cfg.stinger.interval) or 10)
+		local rem = self.lastUseClock and math.max(0, interval - ((now or os.clock()) - self.lastUseClock)) or 0
+		txt = string.format("Status: ON [%s] (Next: %.1fs)", key, rem)
+	end
+	if self.lastStatusText ~= txt then
+		self.lastStatusText = txt
+		self.statusLabel.Text = txt
+	end
+end
+
+function stingerController:UseStinger(now)
+	local stock = self:GetStock()
+	if stock ~= nil and stock <= 0 then
+		self.outOfStock = true
+		self:UpdateStatus(now)
+		return false
+	end
+	self.outOfStock = false
+
+	local triggered = false
+	local cmd = gameApi.PlayerActivesCommand
+	if cmd then
+		local ok = pcall(function()
+			if cmd.IsA and not cmd:IsA("RemoteEvent") and cmd.InvokeServer then
+				secureCall(cmd.InvokeServer, cmd, { Name = "Stinger" })
+			else
+				secureCall(cmd.FireServer, cmd, { Name = "Stinger" })
+			end
+		end)
+		triggered = ok
+	end
+
+	if not triggered and VirtualInputManager and VirtualInputManager.SendKeyEvent then
+		local slot = math.clamp(math.floor(tonumber(cfg.stinger.slot) or 5), 1, 7)
+		local kc = SLOT_KEYCODES[slot]
+		if kc ~= nil then
+			local okKey = pcall(function()
+				VirtualInputManager:SendKeyEvent(true, kc, false, localPlayer)
+				VirtualInputManager:SendKeyEvent(false, kc, false, localPlayer)
+			end)
+			triggered = okKey
+		end
+	end
+
+	if triggered then
+		self.lastUseClock = now or os.clock()
+		self:UpdateStatus(self.lastUseClock)
+		return true
+	end
+	self:UpdateStatus(now)
+	return false
+end
+
+function stingerController:Step(now)
+	if not self.enabled then
+		self:UpdateStatus(now)
+		return false
+	end
+	local curNow = now or os.clock()
+	local interval = math.max(1, tonumber(cfg.stinger.interval) or 10)
+	if not self.lastUseClock or (curNow - self.lastUseClock) >= interval then
+		return self:UseStinger(curNow)
+	end
+	self:UpdateStatus(curNow)
+	return false
+end
+
+function stingerController:SetEnabled(enabled)
+	self.enabled = enabled == true
+	threads:Cancel("stinger")
+	if self.enabled then
+		self:Step(os.clock())
+		threads:Add("stinger", function()
+			while not threads.closed and self.enabled do
+				self:Step(os.clock())
+				task.wait(0.1)
+			end
+		end)
+	else
+		self.outOfStock = false
+		self:UpdateStatus(os.clock())
+	end
+end
+
+function stingerController:Stop()
+	self.listeningForKey = false
+	self:SetEnabled(false)
 end
 
 -- Token IDs (Hide Tokens & 3D Rare Highlights)
@@ -4666,6 +5235,8 @@ controls.ultraFps = worldFolder.AddSwitch("Ultra FPS Mode (Puff Party)", functio
 		controls.hideBalloons.Set(true)
 		controls.onlyHighlightedTokens.Set(true)
 		controls.hidePuffModels.Set(true)
+		controls.skipCollectAnim.Set(true)
+		controls.hideAmulets.Set(true)
 	else
 		controls.hideDecorations.Set(false)
 		controls.lowGraphics.Set(false)
@@ -4677,6 +5248,8 @@ controls.ultraFps = worldFolder.AddSwitch("Ultra FPS Mode (Puff Party)", functio
 		controls.hideBalloons.Set(false)
 		controls.onlyHighlightedTokens.Set(false)
 		controls.hidePuffModels.Set(false)
+		controls.skipCollectAnim.Set(false)
+		controls.hideAmulets.Set(false)
 	end
 end, "perf", "ultraFps")
 
@@ -4721,6 +5294,14 @@ end, "perf", "onlyHighlightedTokens")
 controls.hidePuffModels = worldFolder.AddSwitch("Hide Non-Mythic Puffshrooms", function()
 	onPuffVisualsChanged()
 end, "perf", "hidePuffModels")
+
+controls.skipCollectAnim = worldFolder.AddSwitch("Skip Pickup Anim", function(enabled)
+	fpsOptimizer:SetSkipCollectAnim(enabled)
+end, "perf", "skipCollectAnim")
+
+controls.hideAmulets = worldFolder.AddSwitch("Hide Player Amulets", function(enabled)
+	fpsOptimizer:SetHideAmulets(enabled)
+end, "perf", "hideAmulets")
 
 worldFolder.Toggle(true, true)
 
@@ -4771,6 +5352,79 @@ controls.flamesMaxRange = flameFolder.AddSlider("Flame Range (studs)", nil, 15, 
 
 flameFolder.Toggle(true, true)
 
+local stingerFolder = assistantTab.AddFolder("Auto Stinger (Slot 5)", true)
+local stingerStatusLabel = stingerFolder.AddLabel("Status: OFF [" .. tostring(cfg.stinger.keybind or "F") .. "]")
+stingerController.statusLabel = stingerStatusLabel
+
+controls.stingerEnabled = stingerFolder.AddSwitch("Auto Use Stinger", function(enabled)
+	stingerController:SetEnabled(enabled)
+end, "stinger", "enabled")
+
+controls.stingerInterval = stingerFolder.AddSlider("Interval (secs)", function()
+	stingerController:UpdateStatus(os.clock())
+end, 5, 30, "stinger", "interval", { Left = true, Decimal = true })
+
+local stingerKeybindBtn
+stingerKeybindBtn = stingerFolder.AddButton("Toggle Keybind: [" .. tostring(cfg.stinger.keybind or "F") .. "]", function()
+	if stingerController.listeningForKey then
+		stingerController.listeningForKey = false
+		stingerKeybindBtn.Text = "Toggle Keybind: [" .. tostring(cfg.stinger.keybind or "F") .. "]"
+		return
+	end
+	stingerController.listeningForKey = true
+	stingerKeybindBtn.Text = "Press any key... (Esc cancels)"
+end, 175)
+stingerController.keybindBtn = stingerKeybindBtn
+stingerFolder.AddLabel("Uses Stinger (Remote + Slot 5 fallback)")
+stingerController:UpdateStatus(os.clock())
+
+stingerFolder.Toggle(true, true)
+
+if UserInputService.InputBegan then
+	connections:Add("stingerKeybind", UserInputService.InputBegan:Connect(function(inputObj, gameProcessed)
+		if not inputObj or inputObj.UserInputType ~= Enum.UserInputType.Keyboard or not inputObj.KeyCode then
+			return
+		end
+		local kc = inputObj.KeyCode
+		local okName, rawName = pcall(function()
+			return kc.Name
+		end)
+		local keyName = okName and type(rawName) == "string" and rawName or nil
+		if not keyName then
+			local s = tostring(kc)
+			keyName = string.match(s, "KeyCode%.(.+)") or s
+		end
+		if not keyName or keyName == "Unknown" then
+			return
+		end
+		if stingerController.listeningForKey then
+			stingerController.listeningForKey = false
+			if keyName == "Escape" or keyName == "Backspace" then
+				stingerKeybindBtn.Text = "Toggle Keybind: [" .. tostring(cfg.stinger.keybind or "F") .. "]"
+				return
+			end
+			cfg.stinger.keybind = keyName
+			saveConfig()
+			stingerKeybindBtn.Text = "Toggle Keybind: [" .. keyName .. "]"
+			stingerController:UpdateStatus(os.clock())
+			ui.Notify("Auto Stinger", "Keybind set to [" .. keyName .. "]")
+			return
+		end
+		if gameProcessed then
+			return
+		end
+		if UserInputService.GetFocusedTextBox and UserInputService:GetFocusedTextBox() ~= nil then
+			return
+		end
+		local activeBind = tostring(cfg.stinger.keybind or "F")
+		if string.upper(keyName) == string.upper(activeBind) then
+			local nextState = not cfg.stinger.enabled
+			controls.stingerEnabled.Set(nextState)
+			ui.Notify("Auto Stinger", nextState and ("ON [" .. activeBind .. "] (Every " .. tostring(cfg.stinger.interval) .. "s)") or ("OFF [" .. activeBind .. "]"))
+		end
+	end))
+end
+
 -- Settings Tab
 local settingsFolder = settingsTab.AddFolder("Assistant")
 
@@ -4808,6 +5462,12 @@ settingsFolder.AddButton("Reset All Settings", function()
 	controls.hideBalloons.Set(cfg.perf.hideBalloons)
 	controls.onlyHighlightedTokens.Set(cfg.perf.onlyHighlightedTokens)
 	controls.hidePuffModels.Set(cfg.perf.hidePuffModels)
+	controls.skipCollectAnim.Set(cfg.perf.skipCollectAnim)
+	controls.hideAmulets.Set(cfg.perf.hideAmulets)
+	stingerController.listeningForKey = false
+	stingerKeybindBtn.Text = "Toggle Keybind: [" .. tostring(cfg.stinger.keybind or "F") .. "]"
+	controls.stingerEnabled.Set(cfg.stinger.enabled)
+	controls.stingerInterval.Set(cfg.stinger.interval)
 	controls.flamesEnabled.Set(cfg.flames.enabled)
 	controls.flamesShiftLockCompat.Set(cfg.flames.shiftLockCompat)
 	controls.flamesRefreshPriority.Set(cfg.flames.refreshPriority)
@@ -5130,6 +5790,7 @@ cleanup = function()
 	flameController:UnbindRenderStep()
 	flameController:ReleaseGyro()
 	flameController:InvalidateTarget()
+	stingerController:Stop()
 	table.clear(flameController.tracked)
 	flameController.cachedField = nil
 	flameController.cachedFieldPos = nil
@@ -5165,6 +5826,8 @@ if isTestHarness then
 	api.decorationsController = decorationsController
 	api.fpsOptimizer = fpsOptimizer
 	api.flameController = flameController
+	api.stingerController = stingerController
+	api.stingerKeybindBtn = stingerKeybindBtn
 	api.monitorState = monitorState
 	api.monitorFrame = monitorFrame
 	api.monitorMainText = monitorMainText
